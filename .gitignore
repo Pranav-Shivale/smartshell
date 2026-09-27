@@ -1,0 +1,22 @@
+# Build artifacts
+build/
+bin/
+
+# Object files and dependencies
+*.o
+*.d
+
+# Editor and IDE files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Debug artifacts
+core
+core.*
+vgcore.*
+
+# OS files
+.DS_Store
