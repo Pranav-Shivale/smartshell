@@ -4,6 +4,7 @@
 
 #include "executor.h"
 #include "builtins.h"
+#include "job.h"
 #include "redirect.h"
 #include "utils.h"
 
@@ -15,7 +16,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-int execute_pipeline(const command_t *cmd)
+int execute_pipeline(const command_t *cmd, const char *cmdline)
 {
     if (cmd == NULL) {
         return 0;
@@ -148,6 +149,10 @@ int execute_pipeline(const command_t *cmd)
         free(pipefds);
     }
 
+    /* Register the pipeline as one logical job in the job table */
+    job_t *job = job_create(pids, cmd, num_cmds, cmdline, true);
+    int jid = (job != NULL) ? job->jid : -1;
+
     /* Parent process: wait for all child processes to complete */
     int last_status = 0;
     for (int i = 0; i < num_cmds; i++) {
@@ -160,13 +165,21 @@ int execute_pipeline(const command_t *cmd)
         if (wpid == -1) {
             fprintf(stderr, "smartshell: waitpid failed: %s\n", strerror(errno));
             last_status = -1;
-        } else if (i == num_cmds - 1) {
-            if (WIFEXITED(status)) {
-                last_status = WEXITSTATUS(status);
-            } else if (WIFSIGNALED(status)) {
-                last_status = 128 + WTERMSIG(status);
+        } else {
+            job_update_process_status(pids[i], status, PROC_COMPLETED);
+            if (i == num_cmds - 1) {
+                if (WIFEXITED(status)) {
+                    last_status = WEXITSTATUS(status);
+                } else if (WIFSIGNALED(status)) {
+                    last_status = 128 + WTERMSIG(status);
+                }
             }
         }
+    }
+
+    /* Foreground job has completed; clean up from table */
+    if (jid > 0) {
+        job_remove(jid);
     }
 
     free(pids);
@@ -175,5 +188,5 @@ int execute_pipeline(const command_t *cmd)
 
 int execute_command(const command_t *cmd)
 {
-    return execute_pipeline(cmd);
+    return execute_pipeline(cmd, NULL);
 }

@@ -5,6 +5,7 @@
 #include "shell.h"
 #include "builtins.h"
 #include "executor.h"
+#include "job.h"
 #include "parser.h"
 #include "redirect.h"
 
@@ -64,6 +65,9 @@ int shell_run(void)
 {
     char input[SMARTSHELL_MAX_INPUT];
     int last_status = 0;
+
+    /* Initialize the job management subsystem */
+    job_table_init();
 
     for (;;) {
         if (!display_prompt()) {
@@ -132,6 +136,7 @@ int shell_run(void)
                         close(saved_stderr);
                     }
                     free_command(cmd);
+                    job_table_cleanup();
                     return exit_code;
                 }
             }
@@ -150,11 +155,12 @@ int shell_run(void)
                 close(saved_stderr);
             }
         } else {
-            last_status = execute_pipeline(cmd);
+            last_status = execute_pipeline(cmd, input);
         }
 
         free_command(cmd);
     }
 
+    job_table_cleanup();
     return last_status;
 }

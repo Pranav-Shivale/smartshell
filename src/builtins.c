@@ -3,6 +3,7 @@
  */
 
 #include "builtins.h"
+#include "job.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -19,7 +20,8 @@ bool is_builtin(const char *name)
             strcmp(name, "pwd") == 0 ||
             strcmp(name, "exit") == 0 ||
             strcmp(name, "quit") == 0 ||
-            strcmp(name, "help") == 0);
+            strcmp(name, "help") == 0 ||
+            strcmp(name, "jobs") == 0);
 }
 
 static int builtin_cd(const command_t *cmd)
@@ -64,6 +66,7 @@ static int builtin_help(void)
     printf("SmartShell — Built-in Commands:\n");
     printf("  cd [dir]       Change the working directory (defaults to HOME)\n");
     printf("  pwd            Print the current working directory\n");
+    printf("  jobs           List active jobs\n");
     printf("  help           Display this help message\n");
     printf("  exit [code]    Exit the shell with optional status (0-255)\n");
     printf("  quit [code]    Alias for exit\n\n");
@@ -133,6 +136,10 @@ int execute_builtin(const command_t *cmd, bool *should_exit, int *exit_code)
     }
     if (strcmp(name, "pwd") == 0) {
         return builtin_pwd();
+    }
+    if (strcmp(name, "jobs") == 0) {
+        job_table_print();
+        return 0;
     }
     if (strcmp(name, "help") == 0) {
         return builtin_help();
