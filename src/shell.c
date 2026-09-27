@@ -1,11 +1,11 @@
 /*
  * shell.c — SmartShell REPL implementation.
- *
- * Phase 1: Minimal REPL that reads lines and echoes them back.
- * Exits cleanly on EOF (Ctrl+D) or read error.
  */
 
 #include "shell.h"
+#include "builtins.h"
+#include "executor.h"
+#include "parser.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -61,6 +61,7 @@ static int read_line(char *buf, size_t bufsize)
 int shell_run(void)
 {
     char input[SMARTSHELL_MAX_INPUT];
+    int last_status = 0;
 
     for (;;) {
         if (!display_prompt()) {
@@ -78,13 +79,35 @@ int shell_run(void)
             continue;
         }
 
-        /*
-         * Phase 1 behavior: echo the input back.
-         * This will be replaced by: parse → built-in check → execute
-         * in subsequent phases.
-         */
-        fprintf(stdout, "%s\n", input);
+        const char *errmsg = NULL;
+        command_t *cmd = parse_command(input, &errmsg);
+
+        if (cmd == NULL) {
+            if (errmsg != NULL) {
+                fprintf(stderr, "smartshell: syntax error: %s\n", errmsg);
+            }
+            continue;
+        }
+
+        if (cmd->argv == NULL || cmd->argv[0] == NULL) {
+            free_command(cmd);
+            continue;
+        }
+
+        if (is_builtin(cmd->argv[0])) {
+            bool should_exit = false;
+            int exit_code = 0;
+            last_status = execute_builtin(cmd, &should_exit, &exit_code);
+            if (should_exit) {
+                free_command(cmd);
+                return exit_code;
+            }
+        } else {
+            last_status = execute_command(cmd);
+        }
+
+        free_command(cmd);
     }
 
-    return 0;
+    return last_status;
 }
