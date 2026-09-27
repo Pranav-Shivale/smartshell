@@ -1,0 +1,70 @@
+#!/bin/bash
+# run_tests.sh — Integration test suite for SmartShell Phase 3.
+
+set -e
+
+SHELL_BIN="./bin/smartshell"
+TMP_DIR="/tmp/smartshell_integration_$$"
+mkdir -p "$TMP_DIR"
+
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+passed=0
+failed=0
+
+run_test() {
+    local name="$1"
+    local input="$2"
+    local expected_output="$3"
+
+    printf "  RUN  integration: %s\n" "$name"
+
+    actual_output=$(printf "%s\nexit\n" "$input" | "$SHELL_BIN" 2>&1 || true)
+    
+    if [ -n "$expected_output" ]; then
+        if ! echo "$actual_output" | grep -Fq "$expected_output"; then
+            printf "  FAIL integration: %s\n" "$name"
+            echo "    Expected to find: $expected_output"
+            echo "    Actual output:"
+            echo "$actual_output"
+            failed=$((failed + 1))
+            return
+        fi
+    fi
+
+    printf "  PASS integration: %s\n" "$name"
+    passed=$((passed + 1))
+}
+
+echo "Running SmartShell Integration Tests:"
+
+# 1. Pipelines
+run_test "simple pipe" "ls src | grep parser" "parser.c"
+run_test "multi-stage pipeline" "printf 'apple\nbanana\nband\n' | grep an | wc -l" "2"
+
+# 2. Redirection
+run_test "output redirect truncate" "$(printf 'echo hello_truncate > %s/out.txt\ncat %s/out.txt' "$TMP_DIR" "$TMP_DIR")" "hello_truncate"
+run_test "output redirect append" "$(printf 'echo line1 > %s/app.txt\necho line2 >> %s/app.txt\ncat %s/app.txt' "$TMP_DIR" "$TMP_DIR" "$TMP_DIR")" "line2"
+run_test "input redirect" "$(printf 'echo input_test > %s/in.txt\ncat < %s/in.txt' "$TMP_DIR" "$TMP_DIR")" "input_test"
+run_test "stderr redirect" "$(printf 'ls /nonexistent_directory_for_test 2> %s/err.txt\ncat %s/err.txt' "$TMP_DIR" "$TMP_DIR")" "No such file or directory"
+
+# 3. Combinations of pipes and redirection
+run_test "pipe and input redirect" "$(printf 'echo "red\ngreen\nblue" > %s/colors.txt\ncat < %s/colors.txt | grep green' "$TMP_DIR" "$TMP_DIR")" "green"
+run_test "pipe and output redirect" "$(printf 'printf "3\n1\n2\n" | sort > %s/sorted.txt\ncat %s/sorted.txt' "$TMP_DIR" "$TMP_DIR")" "1"
+
+# 4. Built-ins with redirection and pipes
+run_test "built-in with output redirection" "$(printf 'pwd > %s/pwd.txt\ncat %s/pwd.txt' "$TMP_DIR" "$TMP_DIR")" "smartshell"
+run_test "built-in in pipeline" "help | grep Built-in" "Built-in Commands"
+
+# 5. Syntax errors
+run_test "syntax error leading pipe" "| ls" "syntax error: unexpected token"
+run_test "syntax error trailing pipe" "ls |" "syntax error: unexpected token"
+run_test "syntax error missing redirect target" "echo hello >" "syntax error: expected filename after redirection"
+
+echo ""
+echo "=== Integration Test Results: $((passed + failed)) run, $passed passed, $failed failed ==="
+
+if [ "$failed" -gt 0 ]; then
+    exit 1
+fi
+exit 0

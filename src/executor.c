@@ -1,8 +1,11 @@
 /*
- * executor.c — External command execution engine for SmartShell.
+ * executor.c — External command and pipeline execution engine for SmartShell.
  */
 
 #include "executor.h"
+#include "builtins.h"
+#include "redirect.h"
+#include "utils.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -12,53 +15,165 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-int execute_command(const command_t *cmd)
+int execute_pipeline(const command_t *cmd)
 {
-    if (cmd == NULL || cmd->argv == NULL || cmd->argv[0] == NULL) {
+    if (cmd == NULL) {
         return 0;
     }
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "smartshell: fork failed: %s\n", strerror(errno));
-        return -1;
+    /* Count number of commands in the pipeline */
+    int num_cmds = 0;
+    for (const command_t *c = cmd; c != NULL; c = c->pipe_next) {
+        num_cmds++;
     }
 
-    if (pid == 0) {
-        /* Child process: execute the requested program */
-        execvp(cmd->argv[0], cmd->argv);
+    if (num_cmds == 0) {
+        return 0;
+    }
 
-        /* execvp only returns on failure */
-        int err = errno;
-        if (err == ENOENT) {
-            fprintf(stderr, "smartshell: command not found: %s\n", cmd->argv[0]);
-            _exit(127);
-        } else if (err == EACCES) {
-            fprintf(stderr, "smartshell: permission denied: %s\n", cmd->argv[0]);
-            _exit(126);
-        } else {
-            fprintf(stderr, "smartshell: %s: %s\n", cmd->argv[0], strerror(err));
-            _exit(126);
+    int num_pipes = num_cmds - 1;
+    int *pipefds = NULL;
+
+    /* Create all required pipes */
+    if (num_pipes > 0) {
+        pipefds = xmalloc(num_pipes * 2 * sizeof(int));
+        for (int i = 0; i < num_pipes; i++) {
+            if (pipe(&pipefds[2 * i]) < 0) {
+                fprintf(stderr, "smartshell: pipe failed: %s\n", strerror(errno));
+                for (int j = 0; j < i; j++) {
+                    close(pipefds[2 * j]);
+                    close(pipefds[2 * j + 1]);
+                }
+                free(pipefds);
+                return -1;
+            }
         }
     }
 
-    /* Parent process: wait for foreground child to complete */
-    int status = 0;
-    pid_t wpid;
-    do {
-        wpid = waitpid(pid, &status, 0);
-    } while (wpid == -1 && errno == EINTR);
+    /* Array of child process IDs representing this pipeline job */
+    pid_t *pids = xmalloc(num_cmds * sizeof(pid_t));
+    const command_t *curr = cmd;
 
-    if (wpid == -1) {
-        fprintf(stderr, "smartshell: waitpid failed: %s\n", strerror(errno));
-        return -1;
+    for (int i = 0; i < num_cmds; i++, curr = curr->pipe_next) {
+        pid_t pid = fork();
+        if (pid < 0) {
+            fprintf(stderr, "smartshell: fork failed: %s\n", strerror(errno));
+
+            /* Close all pipes in parent */
+            if (pipefds != NULL) {
+                for (int j = 0; j < 2 * num_pipes; j++) {
+                    close(pipefds[j]);
+                }
+                free(pipefds);
+            }
+
+            /* Wait for any children already forked */
+            for (int j = 0; j < i; j++) {
+                int status;
+                waitpid(pids[j], &status, 0);
+            }
+            free(pids);
+            return -1;
+        }
+
+        if (pid == 0) {
+            /* Child process i */
+
+            /* 1. Pipe input from previous command */
+            if (i > 0) {
+                if (dup2(pipefds[2 * (i - 1)], STDIN_FILENO) < 0) {
+                    fprintf(stderr, "smartshell: dup2 pipe in failed: %s\n", strerror(errno));
+                    _exit(1);
+                }
+            }
+
+            /* 2. Pipe output to next command */
+            if (i < num_cmds - 1) {
+                if (dup2(pipefds[2 * i + 1], STDOUT_FILENO) < 0) {
+                    fprintf(stderr, "smartshell: dup2 pipe out failed: %s\n", strerror(errno));
+                    _exit(1);
+                }
+            }
+
+            /* 3. Close all pipe file descriptors in child */
+            if (pipefds != NULL) {
+                for (int j = 0; j < 2 * num_pipes; j++) {
+                    close(pipefds[j]);
+                }
+            }
+
+            /* 4. Set up file redirections (<, >, >>, 2>) */
+            if (setup_redirections(curr) < 0) {
+                _exit(1);
+            }
+
+            /* 5. Handle empty command (e.g. only redirection like '> file') */
+            if (curr->argv == NULL || curr->argv[0] == NULL) {
+                _exit(0);
+            }
+
+            /* 6. Built-in command within a pipeline */
+            if (is_builtin(curr->argv[0])) {
+                bool should_exit = false;
+                int exit_code = 0;
+                int ret = execute_builtin(curr, &should_exit, &exit_code);
+                fflush(NULL);
+                _exit(ret);
+            }
+
+            /* 7. External program execution */
+            execvp(curr->argv[0], curr->argv);
+
+            int err = errno;
+            if (err == ENOENT) {
+                fprintf(stderr, "smartshell: command not found: %s\n", curr->argv[0]);
+                _exit(127);
+            } else if (err == EACCES) {
+                fprintf(stderr, "smartshell: permission denied: %s\n", curr->argv[0]);
+                _exit(126);
+            } else {
+                fprintf(stderr, "smartshell: %s: %s\n", curr->argv[0], strerror(err));
+                _exit(126);
+            }
+        }
+
+        pids[i] = pid;
     }
 
-    if (WIFEXITED(status)) {
-        return WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        return 128 + WTERMSIG(status);
+    /* Parent process: close all pipe file descriptors */
+    if (pipefds != NULL) {
+        for (int j = 0; j < 2 * num_pipes; j++) {
+            close(pipefds[j]);
+        }
+        free(pipefds);
     }
 
-    return status;
+    /* Parent process: wait for all child processes to complete */
+    int last_status = 0;
+    for (int i = 0; i < num_cmds; i++) {
+        int status = 0;
+        pid_t wpid;
+        do {
+            wpid = waitpid(pids[i], &status, 0);
+        } while (wpid == -1 && errno == EINTR);
+
+        if (wpid == -1) {
+            fprintf(stderr, "smartshell: waitpid failed: %s\n", strerror(errno));
+            last_status = -1;
+        } else if (i == num_cmds - 1) {
+            if (WIFEXITED(status)) {
+                last_status = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                last_status = 128 + WTERMSIG(status);
+            }
+        }
+    }
+
+    free(pids);
+    return last_status;
+}
+
+int execute_command(const command_t *cmd)
+{
+    return execute_pipeline(cmd);
 }

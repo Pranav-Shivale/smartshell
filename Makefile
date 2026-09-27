@@ -1,12 +1,13 @@
 # SmartShell Makefile
 #
 # Build configurations:
-#   make            - Release build
-#   make debug      - Debug build (-g, -O0, -DDEBUG)
-#   make asan       - AddressSanitizer + UBSan build
-#   make clean      - Remove all build artifacts
-#   make test       - Build and run unit tests
-#   make test-asan  - Build and run unit tests under ASan + UBSan
+#   make                  - Release build
+#   make debug            - Debug build (-g, -O0, -DDEBUG)
+#   make asan             - AddressSanitizer + UBSan build
+#   make clean            - Remove all build artifacts
+#   make test             - Build and run unit tests
+#   make test-asan        - Build and run unit tests under ASan + UBSan
+#   make test-integration - Run integration tests
 #
 # NOTE: Run 'make clean' before switching between build configurations.
 
@@ -91,7 +92,7 @@ asan: $(TARGET)
 
 # -- Test targets ----------------------------------------------------------
 
-.PHONY: test test-asan
+.PHONY: test test-asan test-integration
 test: $(TEST_BINS)
 	@echo "=== Running Unit Tests ==="
 	@for t in $(TEST_BINS); do \
@@ -103,6 +104,9 @@ test: $(TEST_BINS)
 test-asan: CFLAGS  += -fsanitize=address,undefined -g -O1 -fno-omit-frame-pointer
 test-asan: LDFLAGS += -fsanitize=address,undefined
 test-asan: clean test
+
+test-integration: $(TARGET)
+	@$(TESTDIR)/integration/run_tests.sh
 
 # -- Clean -----------------------------------------------------------------
 

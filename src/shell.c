@@ -6,10 +6,12 @@
 #include "builtins.h"
 #include "executor.h"
 #include "parser.h"
+#include "redirect.h"
 
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 /* Maximum length of a single input line (including null terminator). */
 #define SMARTSHELL_MAX_INPUT 4096
@@ -89,21 +91,66 @@ int shell_run(void)
             continue;
         }
 
-        if (cmd->argv == NULL || cmd->argv[0] == NULL) {
-            free_command(cmd);
-            continue;
-        }
+        /* Check if single command and built-in */
+        if (cmd->pipe_next == NULL && cmd->argv != NULL &&
+            cmd->argv[0] != NULL && is_builtin(cmd->argv[0])) {
+            int saved_stdin = -1;
+            int saved_stdout = -1;
+            int saved_stderr = -1;
+            bool redir_error = false;
 
-        if (is_builtin(cmd->argv[0])) {
-            bool should_exit = false;
-            int exit_code = 0;
-            last_status = execute_builtin(cmd, &should_exit, &exit_code);
-            if (should_exit) {
-                free_command(cmd);
-                return exit_code;
+            if (cmd->input_file != NULL) {
+                saved_stdin = dup(STDIN_FILENO);
+            }
+            if (cmd->output_file != NULL) {
+                saved_stdout = dup(STDOUT_FILENO);
+            }
+            if (cmd->error_file != NULL) {
+                saved_stderr = dup(STDERR_FILENO);
+            }
+
+            if (setup_redirections(cmd) < 0) {
+                redir_error = true;
+                last_status = 1;
+            }
+
+            if (!redir_error) {
+                bool should_exit = false;
+                int exit_code = 0;
+                last_status = execute_builtin(cmd, &should_exit, &exit_code);
+                if (should_exit) {
+                    if (saved_stdin != -1) {
+                        dup2(saved_stdin, STDIN_FILENO);
+                        close(saved_stdin);
+                    }
+                    if (saved_stdout != -1) {
+                        dup2(saved_stdout, STDOUT_FILENO);
+                        close(saved_stdout);
+                    }
+                    if (saved_stderr != -1) {
+                        dup2(saved_stderr, STDERR_FILENO);
+                        close(saved_stderr);
+                    }
+                    free_command(cmd);
+                    return exit_code;
+                }
+            }
+
+            /* Restore saved file descriptors */
+            if (saved_stdin != -1) {
+                dup2(saved_stdin, STDIN_FILENO);
+                close(saved_stdin);
+            }
+            if (saved_stdout != -1) {
+                dup2(saved_stdout, STDOUT_FILENO);
+                close(saved_stdout);
+            }
+            if (saved_stderr != -1) {
+                dup2(saved_stderr, STDERR_FILENO);
+                close(saved_stderr);
             }
         } else {
-            last_status = execute_command(cmd);
+            last_status = execute_pipeline(cmd);
         }
 
         free_command(cmd);
