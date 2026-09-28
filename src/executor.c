@@ -6,6 +6,7 @@
 #include "builtins.h"
 #include "job.h"
 #include "redirect.h"
+#include "signals.h"
 #include "utils.h"
 
 #include <errno.h>
@@ -55,6 +56,10 @@ int execute_pipeline(const command_t *cmd, const char *cmdline)
     pid_t *pids = xmalloc(num_cmds * sizeof(pid_t));
     const command_t *curr = cmd;
 
+    /* Block SIGCHLD across forks and job registration to prevent race conditions */
+    sigset_t prev_mask;
+    signals_block_sigchld(&prev_mask);
+
     for (int i = 0; i < num_cmds; i++, curr = curr->pipe_next) {
         pid_t pid = fork();
         if (pid < 0) {
@@ -68,6 +73,8 @@ int execute_pipeline(const command_t *cmd, const char *cmdline)
                 free(pipefds);
             }
 
+            signals_unblock_sigchld(&prev_mask);
+
             /* Wait for any children already forked */
             for (int j = 0; j < i; j++) {
                 int status;
@@ -80,7 +87,19 @@ int execute_pipeline(const command_t *cmd, const char *cmdline)
         if (pid == 0) {
             /* Child process i */
 
-            /* 1. Pipe input from previous command */
+            /* 1. Unblock signals in child */
+            signals_unblock_sigchld(&prev_mask);
+
+            /* 2. Process group assignment: leader is pids[0] (or 0 for leader child) */
+            pid_t leader_pgid = (i == 0) ? 0 : pids[0];
+            setpgid(0, leader_pgid);
+
+            /* 3. Reset signal handlers to default if interactive */
+            if (shell_is_interactive_mode()) {
+                signals_reset_child_defaults();
+            }
+
+            /* 4. Pipe input from previous command */
             if (i > 0) {
                 if (dup2(pipefds[2 * (i - 1)], STDIN_FILENO) < 0) {
                     fprintf(stderr, "smartshell: dup2 pipe in failed: %s\n", strerror(errno));
@@ -88,7 +107,7 @@ int execute_pipeline(const command_t *cmd, const char *cmdline)
                 }
             }
 
-            /* 2. Pipe output to next command */
+            /* 5. Pipe output to next command */
             if (i < num_cmds - 1) {
                 if (dup2(pipefds[2 * i + 1], STDOUT_FILENO) < 0) {
                     fprintf(stderr, "smartshell: dup2 pipe out failed: %s\n", strerror(errno));
@@ -96,24 +115,24 @@ int execute_pipeline(const command_t *cmd, const char *cmdline)
                 }
             }
 
-            /* 3. Close all pipe file descriptors in child */
+            /* 6. Close all pipe file descriptors in child */
             if (pipefds != NULL) {
                 for (int j = 0; j < 2 * num_pipes; j++) {
                     close(pipefds[j]);
                 }
             }
 
-            /* 4. Set up file redirections (<, >, >>, 2>) */
+            /* 7. Set up file redirections (<, >, >>, 2>) */
             if (setup_redirections(curr) < 0) {
                 _exit(1);
             }
 
-            /* 5. Handle empty command (e.g. only redirection like '> file') */
+            /* 8. Handle empty command (e.g. only redirection like '> file') */
             if (curr->argv == NULL || curr->argv[0] == NULL) {
                 _exit(0);
             }
 
-            /* 6. Built-in command within a pipeline */
+            /* 9. Built-in command within a pipeline */
             if (is_builtin(curr->argv[0])) {
                 bool should_exit = false;
                 int exit_code = 0;
@@ -122,7 +141,7 @@ int execute_pipeline(const command_t *cmd, const char *cmdline)
                 _exit(ret);
             }
 
-            /* 7. External program execution */
+            /* 10. External program execution */
             execvp(curr->argv[0], curr->argv);
 
             int err = errno;
@@ -138,7 +157,9 @@ int execute_pipeline(const command_t *cmd, const char *cmdline)
             }
         }
 
+        /* Parent process: record PID and set child's process group */
         pids[i] = pid;
+        setpgid(pid, pids[0]);
     }
 
     /* Parent process: close all pipe file descriptors */
@@ -150,36 +171,35 @@ int execute_pipeline(const command_t *cmd, const char *cmdline)
     }
 
     /* Register the pipeline as one logical job in the job table */
-    job_t *job = job_create(pids, cmd, num_cmds, cmdline, true);
-    int jid = (job != NULL) ? job->jid : -1;
+    bool is_foreground = true;
+    job_t *job = job_create(pids, cmd, num_cmds, cmdline, is_foreground);
 
-    /* Parent process: wait for all child processes to complete */
-    int last_status = 0;
-    for (int i = 0; i < num_cmds; i++) {
-        int status = 0;
-        pid_t wpid;
-        do {
-            wpid = waitpid(pids[i], &status, 0);
-        } while (wpid == -1 && errno == EINTR);
-
-        if (wpid == -1) {
-            fprintf(stderr, "smartshell: waitpid failed: %s\n", strerror(errno));
-            last_status = -1;
-        } else {
-            job_update_process_status(pids[i], status, PROC_COMPLETED);
-            if (i == num_cmds - 1) {
-                if (WIFEXITED(status)) {
-                    last_status = WEXITSTATUS(status);
-                } else if (WIFSIGNALED(status)) {
-                    last_status = 128 + WTERMSIG(status);
-                }
-            }
-        }
+    /* Transfer terminal ownership to the child process group before waiting */
+    if (is_foreground && shell_is_interactive_mode()) {
+        shell_give_terminal_to(pids[0]);
     }
 
-    /* Foreground job has completed; clean up from table */
-    if (jid > 0) {
-        job_remove(jid);
+    /* Unblock SIGCHLD now that job is registered and terminal assigned */
+    signals_unblock_sigchld(&prev_mask);
+
+    int last_status = 0;
+    if (is_foreground) {
+        /* Wait for foreground job to finish or stop */
+        last_status = wait_for_job(job);
+
+        /* Reclaim terminal ownership for the shell */
+        if (shell_is_interactive_mode()) {
+            shell_reclaim_terminal();
+        }
+
+        /* Clean up completed jobs; retain stopped jobs in the table */
+        if (job != NULL) {
+            if (job_is_completed(job)) {
+                job_remove(job->jid);
+            } else if (job_is_stopped(job)) {
+                printf("\n[%d]+  Stopped  %s\n", job->jid, job->command_line);
+            }
+        }
     }
 
     free(pids);

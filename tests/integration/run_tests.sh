@@ -61,10 +61,21 @@ run_test "syntax error leading pipe" "| ls" "syntax error: unexpected token"
 run_test "syntax error trailing pipe" "ls |" "syntax error: unexpected token"
 run_test "syntax error missing redirect target" "echo hello >" "syntax error: expected filename after redirection"
 
+# 6. Phase 5 Process groups and non-interactive execution
+run_test "jobs built-in empty" "jobs" "smartshell>"
+run_test "rapid command sequence in non-interactive mode" "$(printf 'echo one\necho two\necho three' )" "three"
+run_test "pipeline error code propagation" "false | true" "smartshell>"
+
 echo ""
 echo "=== Integration Test Results: $((passed + failed)) run, $passed passed, $failed failed ==="
 
 if [ "$failed" -gt 0 ]; then
     exit 1
 fi
+
+# Run PTY Interactive Tests if python3 is available
+if command -v python3 >/dev/null 2>&1; then
+    python3 tests/test_pty_interactive.py || exit 1
+fi
+
 exit 0

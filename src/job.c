@@ -5,6 +5,7 @@
 #include "job.h"
 #include "utils.h"
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,7 +53,14 @@ void job_table_cleanup(void)
 {
     for (int i = 0; i < MAX_JOBS; i++) {
         if (g_job_table.jobs[i] != NULL) {
-            job_free_internal(g_job_table.jobs[i]);
+            job_t *job = g_job_table.jobs[i];
+            if (job->state == JOB_RUNNING || job->state == JOB_STOPPED) {
+                if (job->pgid > 0) {
+                    kill(-job->pgid, SIGHUP);
+                    kill(-job->pgid, SIGCONT);
+                }
+            }
+            job_free_internal(job);
             g_job_table.jobs[i] = NULL;
         }
     }

@@ -8,6 +8,7 @@
 #include "job.h"
 #include "parser.h"
 #include "redirect.h"
+#include "signals.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -66,10 +67,15 @@ int shell_run(void)
     char input[SMARTSHELL_MAX_INPUT];
     int last_status = 0;
 
-    /* Initialize the job management subsystem */
+    /* Initialize subsystems */
     job_table_init();
+    signals_init();
+    shell_init_terminal();
 
     for (;;) {
+        /* Process any asynchronous child events before displaying prompt */
+        signals_process_chld_events();
+
         if (!display_prompt()) {
             break;
         }
@@ -136,6 +142,8 @@ int shell_run(void)
                         close(saved_stderr);
                     }
                     free_command(cmd);
+                    shell_restore_terminal();
+                    signals_cleanup();
                     job_table_cleanup();
                     return exit_code;
                 }
@@ -161,6 +169,8 @@ int shell_run(void)
         free_command(cmd);
     }
 
+    shell_restore_terminal();
+    signals_cleanup();
     job_table_cleanup();
     return last_status;
 }
