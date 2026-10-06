@@ -19,6 +19,9 @@
 /* Special PID denoting CPU idle periods in the timeline */
 #define SCHED_PID_IDLE   (-1)
 
+/* Default time quantum for Round Robin scheduling */
+#define SCHED_DEFAULT_RR_QUANTUM 4
+
 /*
  * Virtual process representation.
  * All timing metrics use simulated integer units.
@@ -28,7 +31,7 @@ typedef struct {
     int arrival_time;     /* Simulated arrival time (>= 0) */
     int burst_time;       /* Total CPU burst requirement (> 0) */
     int remaining_time;   /* Remaining CPU time needed to complete */
-    int priority;         /* Static priority level */
+    int priority;         /* Static priority level (lower number = higher priority) */
     int start_time;       /* First time process received CPU (or SCHED_TIME_UNSET) */
     int completion_time;  /* Time process finished execution (or SCHED_TIME_UNSET) */
     int waiting_time;     /* Total time spent waiting in ready queue */
@@ -96,10 +99,48 @@ int sched_schedule_fcfs(const sched_process_t *procs, int count, sched_result_t 
  */
 int sched_schedule_sjf(const sched_process_t *procs, int count, sched_result_t *result);
 
+/*
+ * Run Round Robin (RR) preemptive scheduling.
+ * Parameters:
+ *   quantum - Positive integer time quantum (> 0)
+ * Queue/Arrival policy:
+ *   1. Arrived processes enter the FIFO ready queue when arrival_time <= current_time.
+ *   2. Newly arrived processes during a slice are enqueued before requeueing a preempted job.
+ *   3. Simultaneous arrivals enter queue ordered by earliest arrival, then lowest PID.
+ * Returns 0 on success, -1 on invalid input (including quantum <= 0).
+ */
+int sched_schedule_rr(const sched_process_t *procs, int count, int quantum, sched_result_t *result);
+
+/*
+ * Run Priority non-preemptive scheduling.
+ * Policy:
+ *   1. Lower numeric value = higher priority.
+ *   2. Non-preemptive (once scheduled, runs to burst completion).
+ * Tie-breaking:
+ *   1. Lower priority number (highest priority)
+ *   2. Earliest arrival time
+ *   3. Lowest PID
+ * Returns 0 on success, -1 on invalid input.
+ */
+int sched_schedule_priority(const sched_process_t *procs, int count, sched_result_t *result);
+
 /* Compute aggregate and per-process summary metrics */
 int sched_compute_metrics(sched_result_t *result);
 
 /* Helper to lookup a process by PID from the simulation results (returns NULL if not found) */
 const sched_process_t *sched_result_get_proc(const sched_result_t *result, int pid);
+
+/*
+ * Render execution timeline into a formatted textual Gantt chart string.
+ * Returns an allocated string that caller must free(), or NULL on error.
+ */
+char *sched_render_gantt(const sched_result_t *result);
+
+/*
+ * Render execution timeline into caller-provided buffer.
+ * Returns the number of characters formatted (excluding terminating null byte),
+ * or -1 on error.
+ */
+int sched_render_gantt_buf(const sched_result_t *result, char *buf, size_t size);
 
 #endif /* SMARTSHELL_SCHEDULER_H */
