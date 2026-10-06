@@ -1,4 +1,4 @@
-# SmartShell CPU Scheduling Lab (Phase 8A & 8B)
+# SmartShell CPU Scheduling Lab (Phase 8A, 8B & 8C)
 
 The SmartShell CPU Scheduling Lab is an educational simulation environment designed to demonstrate classical operating system CPU scheduling concepts in user space.
 
@@ -105,6 +105,39 @@ $$\text{P1} [0, 2] \longrightarrow \text{P2} [2, 4] \longrightarrow \text{P1} [4
   3. Lowest `pid`
 - **Non-Preemptive Invariant**: Once selected, the process executes until its CPU burst completes. New arrivals with higher priority do **not** preempt the running job.
 - **Idle Periods**: Handled consistently when the ready queue is empty before arrivals.
+
+### E. Multilevel Feedback Queue (MLFQ)
+- **Policy**: Preemptive priority scheduling across 3 distinct feedback queues with starvation prevention.
+- **Queue Architecture**:
+  1. **Q0 (Top Queue)**: Highest priority, Round Robin with time quantum $Q_0 = 4$ simulated ticks (`SCHED_MLFQ_Q0_QUANTUM = 4`).
+  2. **Q1 (Middle Queue)**: Medium priority, Round Robin with time quantum $Q_1 = 8$ simulated ticks (`SCHED_MLFQ_Q1_QUANTUM = 8`).
+  3. **Q2 (Bottom Queue)**: Lowest priority, First-Come, First-Served (FCFS), non-preemptive within Q2 (no quantum time-slicing).
+- **Initial Placement**: Every virtual process enters **Q0** upon its simulated arrival time.
+- **Queue Priority Invariant**: At every scheduling decision, the scheduler selects from the highest-priority non-empty queue ($Q_0 > Q_1 > Q_2$). Jobs in lower queues only execute when higher queues are completely empty.
+- **Demotion Rules**:
+  1. If a job in Q0 consumes its full 4-tick quantum allotment without completing, it is demoted to the tail of Q1.
+  2. If a job in Q1 consumes its full 8-tick quantum allotment without completing, it is demoted to the tail of Q2.
+  3. Jobs in Q2 execute FCFS and are never demoted further.
+- **Higher-Queue Preemption**:
+  - Global queue priority is strictly enforced: If a job in Q1 or Q2 is executing and an uncompleted process arrives in Q0, the lower-queue job is **preempted at the exact arrival tick**.
+  - A preempted Q1 process retains its remaining unexpired quantum allotment and stays at the head of Q1; when higher queues empty, it resumes with its unexpired allotment.
+  - A preempted Q2 process stays at the head of Q2; when higher queues empty, it resumes its FCFS execution.
+  - Within Q2, scheduling is FCFS without voluntary quantum interruptions, but global MLFQ preemption by Q0 arrivals takes immediate precedence.
+- **Priority Boost (Starvation Prevention)**:
+  - To prevent long-running or CPU-intensive jobs in lower queues from starving indefinitely, a global priority boost triggers every 200 simulated ticks (`SCHED_MLFQ_BOOST_INTERVAL = 200` at $t = 200, 400, 600, \dots$).
+  - **Exact Boost Timing**: The simulator clamps running slices so it never silently runs past a boost boundary.
+  - At the boost tick $t_{\text{boost}}$:
+    1. The active execution slice concludes at $t_{\text{boost}}$ (with demotion applied if quantum expired).
+    2. All processes currently in Q1 are moved to the tail of Q0 in deterministic FIFO order.
+    3. All processes currently in Q2 are moved to the tail of Q0 in deterministic FIFO order.
+    4. All processes in Q0 receive a fresh Q0 quantum allotment ($4$ ticks).
+    5. Newly arrived processes arriving at $t_{\text{boost}}$ enter the tail of Q0 (tie-broken by lowest PID).
+- **Quantum-Boundary Arrival Ordering**:
+  - Newly arrived processes enter Q0 **before** a demoted/requeued process is considered for lower-level execution.
+- **Tie-Breaking**:
+  - Simultaneous arrivals at the same simulated tick are ordered by `arrival_time` ascending, breaking ties by lowest `pid`.
+- **Educational Simulation Notice**:
+  - SmartShell does not control Linux's real CPU scheduler. MLFQ is modeled as a discrete integer mathematical simulation in user space.
 
 ---
 

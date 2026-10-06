@@ -22,6 +22,11 @@
 /* Default time quantum for Round Robin scheduling */
 #define SCHED_DEFAULT_RR_QUANTUM 4
 
+/* Multilevel Feedback Queue (MLFQ) parameters */
+#define SCHED_MLFQ_Q0_QUANTUM     4
+#define SCHED_MLFQ_Q1_QUANTUM     8
+#define SCHED_MLFQ_BOOST_INTERVAL 200
+
 /*
  * Virtual process representation.
  * All timing metrics use simulated integer units.
@@ -123,6 +128,31 @@ int sched_schedule_rr(const sched_process_t *procs, int count, int quantum, sche
  * Returns 0 on success, -1 on invalid input.
  */
 int sched_schedule_priority(const sched_process_t *procs, int count, sched_result_t *result);
+
+/*
+ * Run Multilevel Feedback Queue (MLFQ) 3-level scheduling simulation.
+ * Architecture:
+ *   - Q0: Highest priority, Round Robin, quantum = 4 ticks
+ *   - Q1: Medium priority, Round Robin, quantum = 8 ticks
+ *   - Q2: Lowest priority, FCFS (non-preemptive within Q2)
+ * Policy:
+ *   1. Initial placement: All new arrivals enter Q0.
+ *   2. Higher-queue priority: Q0 > Q1 > Q2. Lower queues run only when higher queues empty.
+ *   3. Higher-queue preemption: Arrivals into Q0 preempt running Q1 or Q2 jobs at the arrival tick.
+ *   4. Demotion: Q0 processes exhausting 4 ticks demote to Q1. Q1 processes exhausting 8 ticks demote to Q2.
+ *   5. Priority Boost: Every 200 simulated ticks, all jobs in Q1 and Q2 move to the tail of Q0 in deterministic FIFO order.
+ *   6. Tie-breaking: Simultaneous arrivals order by arrival time asc, then lowest PID.
+ * Returns 0 on success, -1 on invalid input.
+ */
+int sched_schedule_mlfq(const sched_process_t *procs, int count, sched_result_t *result);
+
+/*
+ * Run MLFQ with configurable quantum and boost parameters.
+ * Returns 0 on success, -1 on invalid input (including quantums/boost <= 0).
+ */
+int sched_schedule_mlfq_custom(const sched_process_t *procs, int count,
+                               int q0_quantum, int q1_quantum, int boost_interval,
+                               sched_result_t *result);
 
 /* Compute aggregate and per-process summary metrics */
 int sched_compute_metrics(sched_result_t *result);

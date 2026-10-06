@@ -664,6 +664,344 @@ int sched_schedule_rr(const sched_process_t *procs, int count, int quantum, sche
     return sched_compute_metrics(result);
 }
 
+/*
+ * FIFO Queue helper for MLFQ simulation.
+ */
+typedef struct {
+    int *data;
+    int  head;
+    int  tail;
+    int  size;
+    int  cap;
+} sched_queue_t;
+
+static int sched_queue_init(sched_queue_t *q, int cap) {
+    if (!q || cap <= 0) return -1;
+    q->data = malloc((size_t)cap * sizeof(int));
+    if (!q->data) return -1;
+    q->head = 0;
+    q->tail = 0;
+    q->size = 0;
+    q->cap = cap;
+    return 0;
+}
+
+static void sched_queue_free(sched_queue_t *q) {
+    if (!q) return;
+    free(q->data);
+    q->data = NULL;
+    q->size = 0;
+}
+
+static inline bool sched_queue_empty(const sched_queue_t *q) {
+    return q->size == 0;
+}
+
+static void sched_queue_push_back(sched_queue_t *q, int val) {
+    q->data[q->tail] = val;
+    q->tail = (q->tail + 1) % q->cap;
+    q->size++;
+}
+
+static void sched_queue_push_front(sched_queue_t *q, int val) {
+    q->head = (q->head - 1 + q->cap) % q->cap;
+    q->data[q->head] = val;
+    q->size++;
+}
+
+static int sched_queue_pop_front(sched_queue_t *q) {
+    int val = q->data[q->head];
+    q->head = (q->head + 1) % q->cap;
+    q->size--;
+    return val;
+}
+
+/*
+ * MLFQ helper: collect newly arrived processes with arrival_time <= limit_time,
+ * sort them deterministically by (arrival_time asc, pid asc), and push to Q0.
+ */
+static void sched_mlfq_enqueue_arrivals(const sched_result_t *result, int count, int limit_time,
+                                        bool *arrived, sched_queue_t *q0,
+                                        int *allotment, int q0_quantum) {
+    int num_new = 0;
+    int *new_arr = malloc((size_t)count * sizeof(int));
+    if (!new_arr) return;
+
+    for (int i = 0; i < count; i++) {
+        if (!arrived[i] && result->processes[i].arrival_time <= limit_time) {
+            new_arr[num_new++] = i;
+        }
+    }
+
+    /* Sort deterministic arrivals: arrival_time asc, then pid asc */
+    for (int i = 0; i < num_new - 1; i++) {
+        for (int j = i + 1; j < num_new; j++) {
+            int a = new_arr[i];
+            int b = new_arr[j];
+            bool swap = false;
+            if (result->processes[a].arrival_time > result->processes[b].arrival_time) {
+                swap = true;
+            } else if (result->processes[a].arrival_time == result->processes[b].arrival_time) {
+                if (result->processes[a].pid > result->processes[b].pid) {
+                    swap = true;
+                }
+            }
+            if (swap) {
+                new_arr[i] = b;
+                new_arr[j] = a;
+            }
+        }
+    }
+
+    for (int i = 0; i < num_new; i++) {
+        int idx = new_arr[i];
+        sched_queue_push_back(q0, idx);
+        allotment[idx] = q0_quantum;
+        arrived[idx] = true;
+    }
+
+    free(new_arr);
+}
+
+/*
+ * MLFQ helper: find the earliest arrival time among un-arrived processes.
+ * Returns -1 if all processes have already arrived.
+ */
+static int sched_mlfq_next_arrival(const sched_result_t *result, int count, const bool *arrived) {
+    int next_arr = -1;
+    for (int i = 0; i < count; i++) {
+        if (!arrived[i]) {
+            if (next_arr == -1 || result->processes[i].arrival_time < next_arr) {
+                next_arr = result->processes[i].arrival_time;
+            }
+        }
+    }
+    return next_arr;
+}
+
+int sched_schedule_mlfq_custom(const sched_process_t *procs, int count,
+                               int q0_quantum, int q1_quantum, int boost_interval,
+                               sched_result_t *result) {
+    if (q0_quantum <= 0 || q1_quantum <= 0 || boost_interval <= 0 ||
+        sched_validate_inputs(procs, count, result) != 0) {
+        return -1;
+    }
+
+    sched_result_free(result);
+
+    if (count == 0) {
+        return sched_compute_metrics(result);
+    }
+
+    result->processes = calloc((size_t)count, sizeof(sched_process_t));
+    if (!result->processes) {
+        return -1;
+    }
+    result->process_count = count;
+
+    for (int i = 0; i < count; i++) {
+        result->processes[i] = procs[i];
+        result->processes[i].remaining_time = procs[i].burst_time;
+        result->processes[i].start_time = SCHED_TIME_UNSET;
+        result->processes[i].completion_time = SCHED_TIME_UNSET;
+        result->processes[i].waiting_time = SCHED_TIME_UNSET;
+        result->processes[i].turnaround_time = SCHED_TIME_UNSET;
+        result->processes[i].response_time = SCHED_TIME_UNSET;
+    }
+
+    int q_cap = count + 4;
+    sched_queue_t q0, q1, q2;
+    if (sched_queue_init(&q0, q_cap) != 0 ||
+        sched_queue_init(&q1, q_cap) != 0 ||
+        sched_queue_init(&q2, q_cap) != 0) {
+        sched_queue_free(&q0);
+        sched_queue_free(&q1);
+        sched_queue_free(&q2);
+        sched_result_free(result);
+        return -1;
+    }
+
+    bool *arrived = calloc((size_t)count, sizeof(bool));
+    int *allotment = calloc((size_t)count, sizeof(int));
+    if (!arrived || !allotment) {
+        free(arrived);
+        free(allotment);
+        sched_queue_free(&q0);
+        sched_queue_free(&q1);
+        sched_queue_free(&q2);
+        sched_result_free(result);
+        return -1;
+    }
+
+    int completed_count = 0;
+    int current_time = 0;
+    int next_boost_time = boost_interval;
+
+    /* Enqueue initial arrivals at t = 0 */
+    sched_mlfq_enqueue_arrivals(result, count, current_time, arrived, &q0, allotment, q0_quantum);
+
+    while (completed_count < count) {
+        if (sched_queue_empty(&q0) && sched_queue_empty(&q1) && sched_queue_empty(&q2)) {
+            /* All ready queues are empty: advance to earliest upcoming arrival */
+            int next_arr = sched_mlfq_next_arrival(result, count, arrived);
+            if (next_arr > current_time) {
+                if (sched_timeline_append(result, SCHED_PID_IDLE, current_time, next_arr) != 0) {
+                    free(arrived);
+                    free(allotment);
+                    sched_queue_free(&q0);
+                    sched_queue_free(&q1);
+                    sched_queue_free(&q2);
+                    sched_result_free(result);
+                    return -1;
+                }
+                current_time = next_arr;
+            }
+
+            /* Advance next_boost_time if idle span crossed boost boundaries */
+            while (next_boost_time <= current_time) {
+                next_boost_time += boost_interval;
+            }
+
+            sched_mlfq_enqueue_arrivals(result, count, current_time, arrived, &q0, allotment, q0_quantum);
+            continue;
+        }
+
+        /* Select job from highest priority non-empty queue: Q0 > Q1 > Q2 */
+        int cur_idx;
+        int cur_queue;
+        if (!sched_queue_empty(&q0)) {
+            cur_idx = sched_queue_pop_front(&q0);
+            cur_queue = 0;
+        } else if (!sched_queue_empty(&q1)) {
+            cur_idx = sched_queue_pop_front(&q1);
+            cur_queue = 1;
+        } else {
+            cur_idx = sched_queue_pop_front(&q2);
+            cur_queue = 2;
+        }
+
+        sched_process_t *p = &result->processes[cur_idx];
+        if (p->start_time == SCHED_TIME_UNSET) {
+            p->start_time = current_time;
+            p->response_time = p->start_time - p->arrival_time;
+        }
+
+        /* Determine nominal execution duration for this slice */
+        int desired_run;
+        if (cur_queue == 0 || cur_queue == 1) {
+            desired_run = (p->remaining_time < allotment[cur_idx]) ? p->remaining_time : allotment[cur_idx];
+        } else {
+            /* Q2 is FCFS non-preemptive within Q2 */
+            desired_run = p->remaining_time;
+        }
+
+        int actual_run = desired_run;
+
+        /* Boost boundary constraint: do not silently run past boost boundary */
+        if (current_time + actual_run > next_boost_time) {
+            actual_run = next_boost_time - current_time;
+        }
+
+        /* Higher-queue preemption constraint: if in Q1 or Q2, preempt at next arrival (which enters Q0) */
+        if (cur_queue == 1 || cur_queue == 2) {
+            int next_arr = sched_mlfq_next_arrival(result, count, arrived);
+            if (next_arr != -1 && next_arr > current_time && next_arr < current_time + actual_run) {
+                actual_run = next_arr - current_time;
+            }
+        }
+
+        int end_slice_time = current_time + actual_run;
+        if (sched_timeline_append(result, p->pid, current_time, end_slice_time) != 0) {
+            free(arrived);
+            free(allotment);
+            sched_queue_free(&q0);
+            sched_queue_free(&q1);
+            sched_queue_free(&q2);
+            sched_result_free(result);
+            return -1;
+        }
+
+        current_time = end_slice_time;
+        p->remaining_time -= actual_run;
+        if (cur_queue == 0 || cur_queue == 1) {
+            allotment[cur_idx] -= actual_run;
+        }
+
+        if (p->remaining_time == 0) {
+            p->completion_time = current_time;
+            p->turnaround_time = p->completion_time - p->arrival_time;
+            p->waiting_time = p->turnaround_time - p->burst_time;
+            completed_count++;
+        } else {
+            /* Process did not finish: determine requeue or demotion */
+            if (cur_queue == 0) {
+                if (allotment[cur_idx] == 0) {
+                    /* Exhausted Q0 quantum: demote to tail of Q1 */
+                    allotment[cur_idx] = q1_quantum;
+                    sched_queue_push_back(&q1, cur_idx);
+                } else {
+                    /* Preempted before quantum expiration (boost boundary): keep at head of Q0 */
+                    sched_queue_push_front(&q0, cur_idx);
+                }
+            } else if (cur_queue == 1) {
+                if (allotment[cur_idx] == 0) {
+                    /* Exhausted Q1 quantum: demote to tail of Q2 */
+                    sched_queue_push_back(&q2, cur_idx);
+                } else {
+                    /* Preempted before quantum expiration: retain remaining allotment at head of Q1 */
+                    sched_queue_push_front(&q1, cur_idx);
+                }
+            } else {
+                /* Q2: preempted by boost or higher-queue arrival, remains at head of Q2 */
+                sched_queue_push_front(&q2, cur_idx);
+            }
+        }
+
+        /* Enqueue any new arrivals up to current_time into Q0 (before lower queues run) */
+        sched_mlfq_enqueue_arrivals(result, count, current_time, arrived, &q0, allotment, q0_quantum);
+
+        /* Process Priority Boost if current_time reached boost boundary */
+        if (current_time == next_boost_time) {
+            /* Move all processes in Q1 to Q0 in FIFO order */
+            while (!sched_queue_empty(&q1)) {
+                int idx = sched_queue_pop_front(&q1);
+                sched_queue_push_back(&q0, idx);
+                allotment[idx] = q0_quantum;
+            }
+            /* Move all processes in Q2 to Q0 in FIFO order */
+            while (!sched_queue_empty(&q2)) {
+                int idx = sched_queue_pop_front(&q2);
+                sched_queue_push_back(&q0, idx);
+                allotment[idx] = q0_quantum;
+            }
+            /* Reset quantum for any processes already in Q0 */
+            for (int i = 0; i < count; i++) {
+                if (arrived[i] && result->processes[i].remaining_time > 0) {
+                    allotment[i] = q0_quantum;
+                }
+            }
+
+            next_boost_time += boost_interval;
+        }
+    }
+
+    free(arrived);
+    free(allotment);
+    sched_queue_free(&q0);
+    sched_queue_free(&q1);
+    sched_queue_free(&q2);
+
+    return sched_compute_metrics(result);
+}
+
+int sched_schedule_mlfq(const sched_process_t *procs, int count, sched_result_t *result) {
+    return sched_schedule_mlfq_custom(procs, count,
+                                      SCHED_MLFQ_Q0_QUANTUM,
+                                      SCHED_MLFQ_Q1_QUANTUM,
+                                      SCHED_MLFQ_BOOST_INTERVAL,
+                                      result);
+}
+
 const sched_process_t *sched_result_get_proc(const sched_result_t *result, int pid) {
     if (!result || !result->processes) {
         return NULL;

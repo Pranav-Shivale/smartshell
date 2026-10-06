@@ -1497,6 +1497,738 @@ static void test_edge_case_invalid_inputs(void) {
     sched_result_free(&res);
 }
 
+/* ------------------------------------------------------------------------- */
+/* E. Multilevel Feedback Queue (MLFQ) Tests (Phase 8C)                      */
+/* ------------------------------------------------------------------------- */
+
+static void test_mlfq_single_process_completes_in_q0(void) {
+    sched_process_t procs[1];
+    sched_process_init(&procs[0], 1, 0, 3, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 1, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(1, res.process_count);
+    ASSERT_EQ_INT(1, res.timeline_count);
+
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(3, res.timeline[0].end_time);
+
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_NOT_NULL(p1);
+    ASSERT_EQ_INT(0, p1->start_time);
+    ASSERT_EQ_INT(3, p1->completion_time);
+    ASSERT_EQ_INT(0, p1->remaining_time);
+    ASSERT_EQ_INT(3, p1->turnaround_time);
+    ASSERT_EQ_INT(0, p1->waiting_time);
+    ASSERT_EQ_INT(0, p1->response_time);
+
+    ASSERT_EQ_INT(3, res.total_elapsed_time);
+    ASSERT_EQ_INT(3, res.total_busy_time);
+    ASSERT_EQ_INT(0, res.total_idle_time);
+    ASSERT_DOUBLE_NEAR(100.0, res.cpu_utilization, EPSILON);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_single_process_q0_demotion_to_q1(void) {
+    /*
+     * P1 (burst 8, arr 0) runs 0..4 in Q0, demoted to Q1 at 4.
+     * Starts in Q1 at 4.
+     * P2 (burst 2, arr 5) arrives at 5 in Q0 -> preempts P1 in Q1!
+     * P2 runs 5..7 in Q0 to completion.
+     * P1 resumes in Q1 at 7 and finishes remaining 3 ticks at 10.
+     */
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 8, 0);
+    sched_process_init(&procs[1], 2, 5, 2, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 2, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(2, res.process_count);
+    ASSERT_EQ_INT(3, res.timeline_count);
+
+    /* P1 runs 0..5 (0..4 in Q0, 4..5 in Q1 merged) */
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(5, res.timeline[0].end_time);
+
+    /* P2 preempts in Q0: 5..7 */
+    ASSERT_EQ_INT(2, res.timeline[1].pid);
+    ASSERT_EQ_INT(5, res.timeline[1].start_time);
+    ASSERT_EQ_INT(7, res.timeline[1].end_time);
+
+    /* P1 resumes in Q1: 7..10 */
+    ASSERT_EQ_INT(1, res.timeline[2].pid);
+    ASSERT_EQ_INT(7, res.timeline[2].start_time);
+    ASSERT_EQ_INT(10, res.timeline[2].end_time);
+
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_NOT_NULL(p1);
+    ASSERT_EQ_INT(0, p1->start_time);
+    ASSERT_EQ_INT(10, p1->completion_time);
+    ASSERT_EQ_INT(0, p1->remaining_time);
+    ASSERT_EQ_INT(10, p1->turnaround_time);
+    ASSERT_EQ_INT(2, p1->waiting_time);
+    ASSERT_EQ_INT(0, p1->response_time);
+
+    const sched_process_t *p2 = sched_result_get_proc(&res, 2);
+    ASSERT_NOT_NULL(p2);
+    ASSERT_EQ_INT(5, p2->start_time);
+    ASSERT_EQ_INT(7, p2->completion_time);
+    ASSERT_EQ_INT(0, p2->remaining_time);
+    ASSERT_EQ_INT(2, p2->turnaround_time);
+    ASSERT_EQ_INT(0, p2->waiting_time);
+    ASSERT_EQ_INT(0, p2->response_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_single_process_q1_demotion_to_q2(void) {
+    /*
+     * P1 (burst 18, arr 0) runs:
+     * 0..4 in Q0 (demotes to Q1)
+     * 4..12 in Q1 (uses 8 ticks, demotes to Q2 at 12)
+     * 12..13 in Q2 (needs 6 ticks).
+     * P2 (burst 2, arr 13) arrives in Q0 -> preempts P1 in Q2!
+     * P2 runs 13..15 in Q0 to completion.
+     * P1 resumes in Q2 at 15..20 (5 ticks) to completion.
+     */
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 18, 0);
+    sched_process_init(&procs[1], 2, 13, 2, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 2, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(2, res.process_count);
+    ASSERT_EQ_INT(3, res.timeline_count);
+
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(13, res.timeline[0].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[1].pid);
+    ASSERT_EQ_INT(13, res.timeline[1].start_time);
+    ASSERT_EQ_INT(15, res.timeline[1].end_time);
+
+    ASSERT_EQ_INT(1, res.timeline[2].pid);
+    ASSERT_EQ_INT(15, res.timeline[2].start_time);
+    ASSERT_EQ_INT(20, res.timeline[2].end_time);
+
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_EQ_INT(0, p1->start_time);
+    ASSERT_EQ_INT(20, p1->completion_time);
+    ASSERT_EQ_INT(20, p1->turnaround_time);
+    ASSERT_EQ_INT(2, p1->waiting_time);
+    ASSERT_EQ_INT(0, p1->response_time);
+
+    const sched_process_t *p2 = sched_result_get_proc(&res, 2);
+    ASSERT_EQ_INT(13, p2->start_time);
+    ASSERT_EQ_INT(15, p2->completion_time);
+    ASSERT_EQ_INT(2, p2->turnaround_time);
+    ASSERT_EQ_INT(0, p2->waiting_time);
+    ASSERT_EQ_INT(0, p2->response_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_q2_fcfs_behavior_and_no_further_demotion(void) {
+    /*
+     * P1 (burst 14, arr 0), P2 (burst 14, arr 0)
+     * 0..4: P1 (Q0)
+     * 4..8: P2 (Q0)
+     * 8..16: P1 (Q1, 8 ticks) -> demotes to Q2 at 16 (rem 2)
+     * 16..24: P2 (Q1, 8 ticks) -> demotes to Q2 at 24 (rem 2)
+     * 24..26: P1 (Q2 FCFS, 2 ticks) -> completes at 26
+     * 26..28: P2 (Q2 FCFS, 2 ticks) -> completes at 28
+     */
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 14, 0);
+    sched_process_init(&procs[1], 2, 0, 14, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 2, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(2, res.process_count);
+    ASSERT_EQ_INT(6, res.timeline_count);
+
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(4, res.timeline[0].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[1].pid);
+    ASSERT_EQ_INT(4, res.timeline[1].start_time);
+    ASSERT_EQ_INT(8, res.timeline[1].end_time);
+
+    ASSERT_EQ_INT(1, res.timeline[2].pid);
+    ASSERT_EQ_INT(8, res.timeline[2].start_time);
+    ASSERT_EQ_INT(16, res.timeline[2].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[3].pid);
+    ASSERT_EQ_INT(16, res.timeline[3].start_time);
+    ASSERT_EQ_INT(24, res.timeline[3].end_time);
+
+    ASSERT_EQ_INT(1, res.timeline[4].pid);
+    ASSERT_EQ_INT(24, res.timeline[4].start_time);
+    ASSERT_EQ_INT(26, res.timeline[4].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[5].pid);
+    ASSERT_EQ_INT(26, res.timeline[5].start_time);
+    ASSERT_EQ_INT(28, res.timeline[5].end_time);
+
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_EQ_INT(26, p1->completion_time);
+    ASSERT_EQ_INT(26, p1->turnaround_time);
+    ASSERT_EQ_INT(12, p1->waiting_time);
+    ASSERT_EQ_INT(0, p1->response_time);
+
+    const sched_process_t *p2 = sched_result_get_proc(&res, 2);
+    ASSERT_EQ_INT(28, p2->completion_time);
+    ASSERT_EQ_INT(28, p2->turnaround_time);
+    ASSERT_EQ_INT(14, p2->waiting_time);
+    ASSERT_EQ_INT(4, p2->response_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_multiple_processes_arriving_at_zero(void) {
+    sched_process_t procs[3];
+    sched_process_init(&procs[0], 1, 0, 3, 0);
+    sched_process_init(&procs[1], 2, 0, 6, 0);
+    sched_process_init(&procs[2], 3, 0, 2, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 3, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(3, res.process_count);
+    ASSERT_EQ_INT(4, res.timeline_count);
+
+    /* 0..3: P1 completes */
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(3, res.timeline[0].end_time);
+
+    /* 3..7: P2 in Q0 (demotes to Q1) */
+    ASSERT_EQ_INT(2, res.timeline[1].pid);
+    ASSERT_EQ_INT(3, res.timeline[1].start_time);
+    ASSERT_EQ_INT(7, res.timeline[1].end_time);
+
+    /* 7..9: P3 completes */
+    ASSERT_EQ_INT(3, res.timeline[2].pid);
+    ASSERT_EQ_INT(7, res.timeline[2].start_time);
+    ASSERT_EQ_INT(9, res.timeline[2].end_time);
+
+    /* 9..11: P2 in Q1 completes */
+    ASSERT_EQ_INT(2, res.timeline[3].pid);
+    ASSERT_EQ_INT(9, res.timeline[3].start_time);
+    ASSERT_EQ_INT(11, res.timeline[3].end_time);
+
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_EQ_INT(3, p1->completion_time);
+    const sched_process_t *p2 = sched_result_get_proc(&res, 2);
+    ASSERT_EQ_INT(11, p2->completion_time);
+    const sched_process_t *p3 = sched_result_get_proc(&res, 3);
+    ASSERT_EQ_INT(9, p3->completion_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_staggered_arrivals(void) {
+    sched_process_t procs[3];
+    sched_process_init(&procs[0], 1, 0, 16, 0);
+    sched_process_init(&procs[1], 2, 2, 2, 0);
+    sched_process_init(&procs[2], 3, 6, 2, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 3, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(3, res.process_count);
+    ASSERT_EQ_INT(4, res.timeline_count);
+
+    /* 0..4: P1 (Q0) */
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(4, res.timeline[0].end_time);
+
+    /* 4..6: P2 (Q0) completes */
+    ASSERT_EQ_INT(2, res.timeline[1].pid);
+    ASSERT_EQ_INT(4, res.timeline[1].start_time);
+    ASSERT_EQ_INT(6, res.timeline[1].end_time);
+
+    /* 6..8: P3 (Q0) completes */
+    ASSERT_EQ_INT(3, res.timeline[2].pid);
+    ASSERT_EQ_INT(6, res.timeline[2].start_time);
+    ASSERT_EQ_INT(8, res.timeline[2].end_time);
+
+    /* 8..20: P1 (8..16 in Q1 + 16..20 in Q2) completes */
+    ASSERT_EQ_INT(1, res.timeline[3].pid);
+    ASSERT_EQ_INT(8, res.timeline[3].start_time);
+    ASSERT_EQ_INT(20, res.timeline[3].end_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_higher_priority_preemption_q2(void) {
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 20, 0);
+    sched_process_init(&procs[1], 2, 15, 3, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 2, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(2, res.process_count);
+    ASSERT_EQ_INT(3, res.timeline_count);
+
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(15, res.timeline[0].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[1].pid);
+    ASSERT_EQ_INT(15, res.timeline[1].start_time);
+    ASSERT_EQ_INT(18, res.timeline[1].end_time);
+
+    ASSERT_EQ_INT(1, res.timeline[2].pid);
+    ASSERT_EQ_INT(18, res.timeline[2].start_time);
+    ASSERT_EQ_INT(23, res.timeline[2].end_time);
+
+    const sched_process_t *p2 = sched_result_get_proc(&res, 2);
+    ASSERT_EQ_INT(18, p2->completion_time);
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_EQ_INT(23, p1->completion_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_higher_priority_preemption_q1(void) {
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 10, 0);
+    sched_process_init(&procs[1], 2, 6, 2, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 2, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(2, res.process_count);
+    ASSERT_EQ_INT(3, res.timeline_count);
+
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(6, res.timeline[0].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[1].pid);
+    ASSERT_EQ_INT(6, res.timeline[1].start_time);
+    ASSERT_EQ_INT(8, res.timeline[1].end_time);
+
+    ASSERT_EQ_INT(1, res.timeline[2].pid);
+    ASSERT_EQ_INT(8, res.timeline[2].start_time);
+    ASSERT_EQ_INT(12, res.timeline[2].end_time);
+
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_EQ_INT(12, p1->completion_time);
+    const sched_process_t *p2 = sched_result_get_proc(&res, 2);
+    ASSERT_EQ_INT(8, p2->completion_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_exact_quantum_boundary_arrival(void) {
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 8, 0);
+    sched_process_init(&procs[1], 2, 4, 3, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 2, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(2, res.process_count);
+    ASSERT_EQ_INT(3, res.timeline_count);
+
+    /* 0..4: P1 (Q0) */
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(4, res.timeline[0].end_time);
+
+    /* 4..7: P2 (Q0) runs before P1 in Q1! */
+    ASSERT_EQ_INT(2, res.timeline[1].pid);
+    ASSERT_EQ_INT(4, res.timeline[1].start_time);
+    ASSERT_EQ_INT(7, res.timeline[1].end_time);
+
+    /* 7..11: P1 (Q1) */
+    ASSERT_EQ_INT(1, res.timeline[2].pid);
+    ASSERT_EQ_INT(7, res.timeline[2].start_time);
+    ASSERT_EQ_INT(11, res.timeline[2].end_time);
+
+    const sched_process_t *p2 = sched_result_get_proc(&res, 2);
+    ASSERT_EQ_INT(7, p2->completion_time);
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_EQ_INT(11, p1->completion_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_priority_boost_at_200_ticks(void) {
+    sched_process_t procs[1];
+    sched_process_init(&procs[0], 1, 0, 250, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 1, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(1, res.process_count);
+    ASSERT_EQ_INT(1, res.timeline_count);
+
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(250, res.timeline[0].end_time);
+
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_EQ_INT(0, p1->start_time);
+    ASSERT_EQ_INT(250, p1->completion_time);
+    ASSERT_EQ_INT(0, p1->remaining_time);
+    ASSERT_EQ_INT(250, p1->turnaround_time);
+    ASSERT_EQ_INT(0, p1->waiting_time);
+    ASSERT_EQ_INT(0, p1->response_time);
+
+    ASSERT_EQ_INT(250, res.total_elapsed_time);
+    ASSERT_EQ_INT(250, res.total_busy_time);
+    ASSERT_EQ_INT(0, res.total_idle_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_multiple_boosts_over_400_ticks(void) {
+    sched_process_t procs[1];
+    sched_process_init(&procs[0], 1, 0, 450, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 1, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(1, res.process_count);
+    ASSERT_EQ_INT(1, res.timeline_count);
+
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_EQ_INT(450, p1->completion_time);
+    ASSERT_EQ_INT(450, res.total_elapsed_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_boost_ordering_and_allotment_reset(void) {
+    /*
+     * Custom MLFQ: q0=4, q1=8, boost=24.
+     * P1 (burst 30, arr 0), P2 (burst 30, arr 0).
+     * 0..4: P1 (Q0)
+     * 4..8: P2 (Q0)
+     * 8..16: P1 (Q1) -> demotes to Q2 at 16
+     * 16..24: P2 (Q1) -> demotes to Q2 at 24
+     * At 24: Boost occurs! Q2 order is [P1, P2]. Both move to Q0 with allotment=4.
+     * 24..28: P1 in Q0 (4 ticks)
+     * 28..32: P2 in Q0 (4 ticks)
+     */
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 30, 0);
+    sched_process_init(&procs[1], 2, 0, 30, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq_custom(procs, 2, 4, 8, 24, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(2, res.process_count);
+
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(4, res.timeline[0].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[1].pid);
+    ASSERT_EQ_INT(4, res.timeline[1].start_time);
+    ASSERT_EQ_INT(8, res.timeline[1].end_time);
+
+    ASSERT_EQ_INT(1, res.timeline[2].pid);
+    ASSERT_EQ_INT(8, res.timeline[2].start_time);
+    ASSERT_EQ_INT(16, res.timeline[2].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[3].pid);
+    ASSERT_EQ_INT(16, res.timeline[3].start_time);
+    ASSERT_EQ_INT(24, res.timeline[3].end_time);
+
+    /* Post-boost execution in Q0: P1 then P2 */
+    ASSERT_EQ_INT(1, res.timeline[4].pid);
+    ASSERT_EQ_INT(24, res.timeline[4].start_time);
+    ASSERT_EQ_INT(28, res.timeline[4].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[5].pid);
+    ASSERT_EQ_INT(28, res.timeline[5].start_time);
+    ASSERT_EQ_INT(32, res.timeline[5].end_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_starvation_prevention_boost(void) {
+    /*
+     * P1: long job (arr 0, burst 250).
+     * P2: short job (arr 195, burst 3).
+     * P3: short job (arr 198, burst 3).
+     *
+     * P1 runs 0..4 (Q0), 4..12 (Q1), 12..195 (Q2).
+     * At 195, P2 arrives in Q0 -> preempts P1 in Q2!
+     * 195..198: P2 runs in Q0 to completion at 198.
+     * At 198, P3 arrives in Q0.
+     * 198..200: P3 runs 2 ticks in Q0.
+     * At 200, boost triggers!
+     * P3 was at head of Q0 (1 tick left, resets to 4).
+     * P1 (in Q2) is boosted to tail of Q0 (gets 4 ticks).
+     * 200..201: P3 finishes its remaining 1 tick!
+     * 201..205: P1 runs in Q0! (prevented starvation).
+     */
+    sched_process_t procs[3];
+    sched_process_init(&procs[0], 1, 0, 250, 0);
+    sched_process_init(&procs[1], 2, 195, 3, 0);
+    sched_process_init(&procs[2], 3, 198, 3, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 3, &res);
+    ASSERT_EQ_INT(0, rc);
+
+    const sched_process_t *p2 = sched_result_get_proc(&res, 2);
+    ASSERT_EQ_INT(198, p2->completion_time);
+    const sched_process_t *p3 = sched_result_get_proc(&res, 3);
+    ASSERT_EQ_INT(201, p3->completion_time);
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_EQ_INT(256, p1->completion_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_idle_periods(void) {
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 3, 0);
+    sched_process_init(&procs[1], 2, 8, 4, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 2, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(2, res.process_count);
+    ASSERT_EQ_INT(3, res.timeline_count);
+
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(3, res.timeline[0].end_time);
+
+    ASSERT_EQ_INT(SCHED_PID_IDLE, res.timeline[1].pid);
+    ASSERT_EQ_INT(3, res.timeline[1].start_time);
+    ASSERT_EQ_INT(8, res.timeline[1].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[2].pid);
+    ASSERT_EQ_INT(8, res.timeline[2].start_time);
+    ASSERT_EQ_INT(12, res.timeline[2].end_time);
+
+    ASSERT_EQ_INT(12, res.total_elapsed_time);
+    ASSERT_EQ_INT(7, res.total_busy_time);
+    ASSERT_EQ_INT(5, res.total_idle_time);
+    ASSERT_DOUBLE_NEAR((7.0 / 12.0) * 100.0, res.cpu_utilization, EPSILON);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_repeated_pid_slices(void) {
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 8, 0);
+    sched_process_init(&procs[1], 2, 0, 8, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 2, &res);
+    ASSERT_EQ_INT(0, rc);
+    ASSERT_EQ_INT(4, res.timeline_count);
+
+    ASSERT_EQ_INT(1, res.timeline[0].pid);
+    ASSERT_EQ_INT(0, res.timeline[0].start_time);
+    ASSERT_EQ_INT(4, res.timeline[0].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[1].pid);
+    ASSERT_EQ_INT(4, res.timeline[1].start_time);
+    ASSERT_EQ_INT(8, res.timeline[1].end_time);
+
+    ASSERT_EQ_INT(1, res.timeline[2].pid);
+    ASSERT_EQ_INT(8, res.timeline[2].start_time);
+    ASSERT_EQ_INT(12, res.timeline[2].end_time);
+
+    ASSERT_EQ_INT(2, res.timeline[3].pid);
+    ASSERT_EQ_INT(12, res.timeline[3].start_time);
+    ASSERT_EQ_INT(16, res.timeline[3].end_time);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_metrics_calculation(void) {
+    sched_process_t procs[3];
+    sched_process_init(&procs[0], 1, 0, 6, 0);
+    sched_process_init(&procs[1], 2, 1, 4, 0);
+    sched_process_init(&procs[2], 3, 2, 2, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    int rc = sched_schedule_mlfq(procs, 3, &res);
+    ASSERT_EQ_INT(0, rc);
+
+    const sched_process_t *p1 = sched_result_get_proc(&res, 1);
+    ASSERT_EQ_INT(0, p1->start_time);
+    ASSERT_EQ_INT(12, p1->completion_time);
+    ASSERT_EQ_INT(12, p1->turnaround_time);
+    ASSERT_EQ_INT(6, p1->waiting_time);
+    ASSERT_EQ_INT(0, p1->response_time);
+
+    const sched_process_t *p2 = sched_result_get_proc(&res, 2);
+    ASSERT_EQ_INT(4, p2->start_time);
+    ASSERT_EQ_INT(8, p2->completion_time);
+    ASSERT_EQ_INT(7, p2->turnaround_time);
+    ASSERT_EQ_INT(3, p2->waiting_time);
+    ASSERT_EQ_INT(3, p2->response_time);
+
+    const sched_process_t *p3 = sched_result_get_proc(&res, 3);
+    ASSERT_EQ_INT(8, p3->start_time);
+    ASSERT_EQ_INT(10, p3->completion_time);
+    ASSERT_EQ_INT(8, p3->turnaround_time);
+    ASSERT_EQ_INT(6, p3->waiting_time);
+    ASSERT_EQ_INT(6, p3->response_time);
+
+    ASSERT_EQ_INT(12, res.total_elapsed_time);
+    ASSERT_EQ_INT(12, res.total_busy_time);
+    ASSERT_EQ_INT(0, res.total_idle_time);
+    ASSERT_DOUBLE_NEAR(100.0, res.cpu_utilization, EPSILON);
+    ASSERT_DOUBLE_NEAR(9.0, res.avg_turnaround_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(5.0, res.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(3.0, res.avg_response_time, EPSILON);
+
+    sched_result_free(&res);
+}
+
+static void test_mlfq_determinism(void) {
+    sched_process_t procs[4];
+    sched_process_init(&procs[0], 1, 0, 10, 0);
+    sched_process_init(&procs[1], 2, 2, 6, 0);
+    sched_process_init(&procs[2], 3, 5, 4, 0);
+    sched_process_init(&procs[3], 4, 8, 2, 0);
+
+    sched_result_t res1, res2;
+    sched_result_init(&res1);
+    sched_result_init(&res2);
+
+    ASSERT_EQ_INT(0, sched_schedule_mlfq(procs, 4, &res1));
+    ASSERT_EQ_INT(0, sched_schedule_mlfq(procs, 4, &res2));
+
+    ASSERT_EQ_INT(res1.timeline_count, res2.timeline_count);
+    for (int i = 0; i < res1.timeline_count; i++) {
+        ASSERT_EQ_INT(res1.timeline[i].pid, res2.timeline[i].pid);
+        ASSERT_EQ_INT(res1.timeline[i].start_time, res2.timeline[i].start_time);
+        ASSERT_EQ_INT(res1.timeline[i].end_time, res2.timeline[i].end_time);
+    }
+
+    ASSERT_DOUBLE_NEAR(res1.avg_turnaround_time, res2.avg_turnaround_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(res1.avg_waiting_time, res2.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(res1.avg_response_time, res2.avg_response_time, EPSILON);
+
+    sched_result_free(&res1);
+    sched_result_free(&res2);
+}
+
+static void test_mlfq_edge_cases(void) {
+    sched_result_t res;
+    sched_result_init(&res);
+
+    /* Zero processes */
+    ASSERT_EQ_INT(0, sched_schedule_mlfq(NULL, 0, &res));
+    ASSERT_EQ_INT(0, res.process_count);
+    ASSERT_EQ_INT(0, res.timeline_count);
+    ASSERT_EQ_INT(0, res.total_elapsed_time);
+
+    /* NULL result */
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq(NULL, 0, NULL));
+
+    /* NULL procs with count > 0 */
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq(NULL, 1, &res));
+
+    /* Negative count */
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq(NULL, -1, &res));
+
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 5, 0);
+    sched_process_init(&procs[1], 2, 0, 5, 0);
+
+    /* Invalid burst */
+    procs[0].burst_time = 0;
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq(procs, 2, &res));
+    procs[0].burst_time = -3;
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq(procs, 2, &res));
+    procs[0].burst_time = 5;
+
+    /* Invalid arrival */
+    procs[0].arrival_time = -1;
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq(procs, 2, &res));
+    procs[0].arrival_time = 0;
+
+    /* Duplicate PIDs */
+    procs[1].pid = 1;
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq(procs, 2, &res));
+    procs[1].pid = 2;
+
+    /* Custom MLFQ invalid parameters */
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq_custom(procs, 2, 0, 8, 200, &res));
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq_custom(procs, 2, 4, 0, 200, &res));
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq_custom(procs, 2, 4, 8, 0, &res));
+    ASSERT_EQ_INT(-1, sched_schedule_mlfq_custom(procs, 2, -1, 8, 200, &res));
+
+    sched_result_free(&res);
+}
+
+static void test_gantt_mlfq(void) {
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 5, 0);
+    sched_process_init(&procs[1], 2, 2, 3, 0);
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    ASSERT_EQ_INT(0, sched_schedule_mlfq(procs, 2, &res));
+
+    char *chart = sched_render_gantt(&res);
+    ASSERT_NOT_NULL(chart);
+    ASSERT_TRUE(strstr(chart, "P1") != NULL);
+    ASSERT_TRUE(strstr(chart, "P2") != NULL);
+
+    free(chart);
+    sched_result_free(&res);
+}
+
 static void test_determinism_fcfs(void) {
     sched_process_t procs[3];
     sched_process_init(&procs[0], 1, 0, 6, 0);
@@ -1541,6 +2273,9 @@ static void test_memory_lifecycle_reuse(void) {
 
         ASSERT_EQ_INT(0, sched_schedule_priority(procs, 2, &res));
         ASSERT_EQ_INT(2, res.timeline_count);
+
+        ASSERT_EQ_INT(0, sched_schedule_mlfq(procs, 2, &res));
+        ASSERT_TRUE(res.timeline_count >= 1);
     }
 
     sched_result_free(&res);
@@ -1553,7 +2288,7 @@ static void test_memory_lifecycle_reuse(void) {
 int main(void) {
     TEST_INIT();
 
-    printf("Running Phase 8A & 8B Scheduler Unit Tests:\n");
+    printf("Running Phase 8A, 8B & 8C Scheduler Unit Tests:\n");
 
     /* FCFS Tests */
     RUN_TEST(test_fcfs_single_process_zero_arrival);
@@ -1588,6 +2323,27 @@ int main(void) {
     RUN_TEST(test_priority_staggered_arrivals);
     RUN_TEST(test_priority_idle_periods);
     RUN_TEST(test_priority_determinism);
+
+    /* Multilevel Feedback Queue (MLFQ) Tests */
+    RUN_TEST(test_mlfq_single_process_completes_in_q0);
+    RUN_TEST(test_mlfq_single_process_q0_demotion_to_q1);
+    RUN_TEST(test_mlfq_single_process_q1_demotion_to_q2);
+    RUN_TEST(test_mlfq_q2_fcfs_behavior_and_no_further_demotion);
+    RUN_TEST(test_mlfq_multiple_processes_arriving_at_zero);
+    RUN_TEST(test_mlfq_staggered_arrivals);
+    RUN_TEST(test_mlfq_higher_priority_preemption_q2);
+    RUN_TEST(test_mlfq_higher_priority_preemption_q1);
+    RUN_TEST(test_mlfq_exact_quantum_boundary_arrival);
+    RUN_TEST(test_mlfq_priority_boost_at_200_ticks);
+    RUN_TEST(test_mlfq_multiple_boosts_over_400_ticks);
+    RUN_TEST(test_mlfq_boost_ordering_and_allotment_reset);
+    RUN_TEST(test_mlfq_starvation_prevention_boost);
+    RUN_TEST(test_mlfq_idle_periods);
+    RUN_TEST(test_mlfq_repeated_pid_slices);
+    RUN_TEST(test_mlfq_metrics_calculation);
+    RUN_TEST(test_mlfq_determinism);
+    RUN_TEST(test_mlfq_edge_cases);
+    RUN_TEST(test_gantt_mlfq);
 
     /* Gantt Chart Tests */
     RUN_TEST(test_gantt_simple_fcfs);
