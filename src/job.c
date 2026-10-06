@@ -439,3 +439,11 @@ job_t *job_get_current(void)
     }
     return latest_running;
 }
+
+job_t *job_get_by_index(int idx)
+{
+    if (idx < 0 || idx >= MAX_JOBS) {
+        return NULL;
+    }
+    return g_job_table.jobs[idx];
+}

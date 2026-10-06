@@ -150,4 +150,10 @@ void job_notify_and_cleanup(void);
  */
 job_t *job_get_current(void);
 
+/*
+ * Get job at index in the table (0 <= idx < MAX_JOBS).
+ * Returns job_t pointer or NULL if slot is empty or idx out of bounds.
+ */
+job_t *job_get_by_index(int idx);
+
 #endif /* SMARTSHELL_JOB_H */

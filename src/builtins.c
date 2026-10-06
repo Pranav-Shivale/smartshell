@@ -4,6 +4,7 @@
 
 #include "builtins.h"
 #include "job.h"
+#include "proc_monitor.h"
 #include "signals.h"
 
 #include <ctype.h>
@@ -28,7 +29,8 @@ bool is_builtin(const char *name)
             strcmp(name, "jobs") == 0 ||
             strcmp(name, "fg") == 0 ||
             strcmp(name, "bg") == 0 ||
-            strcmp(name, "kill") == 0);
+            strcmp(name, "kill") == 0 ||
+            strcmp(name, "monitor") == 0);
 }
 
 static int builtin_cd(const command_t *cmd)
@@ -77,6 +79,7 @@ static int builtin_help(void)
     printf("  fg [%%jid]      Bring a job to the foreground\n");
     printf("  bg [%%jid]      Resume a stopped job in the background\n");
     printf("  kill [-sig] <pid|%%jid> Send a signal to a process or job\n");
+    printf("  monitor [pid]  Monitor system overview, shell jobs, or process details via /proc\n");
     printf("  help           Display this help message\n");
     printf("  exit [code]    Exit the shell with optional status (0-255)\n");
     printf("  quit [code]    Alias for exit\n\n");
@@ -419,6 +422,9 @@ int execute_builtin(const command_t *cmd, bool *should_exit, int *exit_code)
     }
     if (strcmp(name, "kill") == 0) {
         return builtin_kill(cmd);
+    }
+    if (strcmp(name, "monitor") == 0) {
+        return builtin_monitor(cmd);
     }
     if (strcmp(name, "help") == 0) {
         return builtin_help();

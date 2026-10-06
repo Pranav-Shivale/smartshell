@@ -73,6 +73,13 @@ run_test "background pipeline shows in jobs" "$(printf 'sleep 2 | cat &\njobs')"
 run_test "stateful builtin rejects background" "cd /tmp &" "cannot run in background"
 run_test "exit builtin rejects background" "exit &" "cannot run in background"
 
+# 8. Phase 7 /proc Process Monitoring
+run_test "monitor system summary" "monitor" "System Overview"
+run_test "monitor PID 1 details" "monitor 1" "Process Information (PID 1)"
+run_test "monitor nonexistent PID" "monitor 999999" "process 999999 not found"
+run_test "monitor invalid PID string" "monitor abc" "invalid process ID"
+run_test "monitor active background job" "$(printf 'sleep 30 &\nmonitor\nkill %%1\n')" "sleep"
+
 echo ""
 echo "=== Integration Test Results: $((passed + failed)) run, $passed passed, $failed failed ==="
 
