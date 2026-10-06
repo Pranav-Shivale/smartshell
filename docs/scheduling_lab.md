@@ -177,3 +177,185 @@ SmartShell provides a clean, dependency-free textual renderer for execution time
 - **Idle Representation**: CPU idle intervals are clearly labeled with `IDLE`.
 - **Preemption Support**: Correctly formats timelines where the same PID appears multiple times across non-contiguous intervals (as in Round Robin).
 - **Pure Textual**: Does not emit ANSI color codes or terminal-dependent escapes, ensuring easy programmatic testing and log readability.
+
+---
+
+## 7. Interactive Shell Command: `schedule`
+
+SmartShell integrates the educational CPU scheduling laboratory into the interactive command line via the built-in `schedule` command.
+
+### 7.1 Command Syntax & Options
+
+```text
+schedule <algorithm> [args]
+schedule help
+```
+
+Running `schedule` with no arguments or `schedule help` prints the usage summary and lists all supported algorithms.
+
+#### Supported Subcommands:
+- `schedule fcfs`: Non-preemptive First-Come, First-Served simulation.
+- `schedule sjf`: Non-preemptive Shortest Job First simulation (tie-broken by arrival time, then PID).
+- `schedule rr [quantum]`: Preemptive Round Robin simulation.
+  - The `[quantum]` parameter is optional and defaults to `4`.
+  - Allowed bounds: `1` to `100` simulated ticks.
+  - Non-numeric or out-of-range quantum values return an error message without crashing or running the simulation.
+- `schedule priority`: Non-preemptive static priority scheduling (lower numerical value = higher priority, tie-broken by arrival time, then PID).
+- `schedule mlfq`: Multilevel Feedback Queue simulation (3 priority levels: Q0 quantum 4, Q1 quantum 8, Q2 FCFS; global priority boost every 200 ticks).
+- `schedule help`: Displays command usage, algorithm descriptions, and options.
+
+### 7.2 Built-in Demo Workload
+
+To provide a consistent, repeatable comparison across all scheduling policies, the `schedule` command runs against a carefully designed 5-process virtual workload:
+
+| Virtual PID | Arrival Time | Burst Time | Priority | Description / Role |
+| :---: | :---: | :---: | :---: | :--- |
+| **P1** | 0 | 8 | 3 | Initial CPU-bound process; establishes baseline execution |
+| **P2** | 1 | 4 | 1 | High-priority process arriving shortly after P1 |
+| **P3** | 3 | 9 | 4 | Longest-running process; demonstrates quantum expiration and demotion |
+| **P4** | 5 | 2 | 2 | Short interactive process; highlights SJF/MLFQ responsiveness |
+| **P5** | 26 | 4 | 2 | Delayed arrival creating an explicit idle gap from tick 23 to 26 |
+
+#### Why This Workload Was Chosen:
+1. **Staggered Arrivals**: P2, P3, and P4 arrive while P1 is executing. This exposes ready queue management, queue reordering, and preemption differences.
+2. **Burst Diversity**: Bursts range from very short (P4: 2) to long (P3: 9), demonstrating SJF efficiency and RR time-slicing.
+3. **Priority Range**: Priorities range from 1 (highest) to 4 (lowest), demonstrating non-preemptive priority dispatching.
+4. **Explicit Idle Interval**: With P1–P4 finishing by tick 23 and P5 arriving at tick 26, the CPU experiences 3 idle ticks ($[23, 26]$), verifying idle state handling across all algorithms.
+5. **Distinct Execution Schedules**: Every algorithm produces a visibly different execution sequence and metric profile on this workload:
+   - **FCFS**: `P1 (8) -> P2 (4) -> P3 (9) -> P4 (2) -> IDLE (3) -> P5 (4)`
+   - **SJF**: `P1 (8) -> P4 (2) -> P2 (4) -> P3 (9) -> IDLE (3) -> P5 (4)`
+   - **Priority**: `P1 (8) -> P2 (4) -> P4 (2) -> P3 (9) -> IDLE (3) -> P5 (4)`
+   - **RR (Q=4)**: `P1 (4) -> P2 (4) -> P3 (4) -> P1 (4) -> P4 (2) -> P3 (5) -> IDLE (3) -> P5 (4)`
+   - **MLFQ**: `P1 (4) -> P2 (4) -> P3 (4) -> P4 (2) -> P1 (4) -> P3 (5) -> IDLE (3) -> P5 (4)`
+
+### 7.3 Output Format
+
+The output of `schedule` consists of four cleanly formatted sections:
+1. **Header & Parameters**: Identifies the algorithm and any algorithm-specific parameters (e.g., RR quantum).
+2. **Workload Table**: Lists the virtual processes with their arrival times, burst times, and priorities.
+3. **Gantt Chart**: Visual textual timeline with process blocks and exact time boundary markers.
+4. **Process Metrics Table**: Detailed per-process statistics ($AT$, $BT$, $PR$, Start Time $ST$, Completion Time $CT$, Waiting Time $WT$, Turnaround Time $TAT$, Response Time $RT$).
+5. **Summary Metrics**: System-wide performance metrics (Total Elapsed Time, Busy Time, Idle Time, CPU Utilization %, Average WT, Average TAT, Average RT).
+
+### 7.4 Example Invocations and Sample Output
+
+#### Example 1: `schedule fcfs`
+
+```text
+smartshell> schedule fcfs
+SmartShell CPU Scheduling Simulation (User-Space Lab)
+Algorithm:  First-Come, First-Served (FCFS)
+
+Workload:
+  PID  Arrival  Burst  Priority
+    1        0      8         3
+    2        1      4         1
+    3        3      9         4
+    4        5      2         2
+    5       26      4         2
+
+Gantt Chart:
+| P1 | P2 | P3 | P4 | IDLE | P5 |
+0    8    12   21   23     26   30
+
+Process Metrics:
+  PID   AT   BT   PR   ST   CT   WT  TAT   RT
+    1    0    8    3    0    8    0    8    0
+    2    1    4    1    8   12    7   11    7
+    3    3    9    4   12   21    9   18    9
+    4    5    2    2   21   23   16   18   16
+    5   26    4    2   26   30    0    4    0
+
+Summary:
+  Total Elapsed Time:      30
+  Total Busy Time:         27
+  Total Idle Time:         3
+  CPU Utilization:         90.00%
+  Average Waiting Time:    6.40
+  Average Turnaround Time: 11.80
+  Average Response Time:   6.40
+```
+
+#### Example 2: `schedule rr 4`
+
+```text
+smartshell> schedule rr 4
+SmartShell CPU Scheduling Simulation (User-Space Lab)
+Algorithm:  Round Robin (RR)
+RR Quantum: 4
+
+Workload:
+  PID  Arrival  Burst  Priority
+    1        0      8         3
+    2        1      4         1
+    3        3      9         4
+    4        5      2         2
+    5       26      4         2
+
+Gantt Chart:
+| P1 | P2 | P3 | P1 | P4 | P3 | IDLE | P5 |
+0    4    8    12   16   18   23     26   30
+
+Process Metrics:
+  PID   AT   BT   PR   ST   CT   WT  TAT   RT
+    1    0    8    3    0   16    8   16    0
+    2    1    4    1    4    8    3    7    3
+    3    3    9    4    8   23   11   20    5
+    4    5    2    2   16   18   11   13   11
+    5   26    4    2   26   30    0    4    0
+
+Summary:
+  Total Elapsed Time:      30
+  Total Busy Time:         27
+  Total Idle Time:         3
+  CPU Utilization:         90.00%
+  Average Waiting Time:    6.60
+  Average Turnaround Time: 12.00
+  Average Response Time:   3.80
+```
+
+#### Example 3: `schedule mlfq`
+
+```text
+smartshell> schedule mlfq
+SmartShell CPU Scheduling Simulation (User-Space Lab)
+Algorithm:  Multilevel Feedback Queue (MLFQ)
+
+Workload:
+  PID  Arrival  Burst  Priority
+    1        0      8         3
+    2        1      4         1
+    3        3      9         4
+    4        5      2         2
+    5       26      4         2
+
+Gantt Chart:
+| P1 | P2 | P3 | P4 | P1 | P3 | IDLE | P5 |
+0    4    8    12   14   18   23     26   30
+
+Process Metrics:
+  PID   AT   BT   PR   ST   CT   WT  TAT   RT
+    1    0    8    3    0   18   10   18    0
+    2    1    4    1    4    8    3    7    3
+    3    3    9    4    8   23   11   20    5
+    4    5    2    2   12   14    7    9    7
+    5   26    4    2   26   30    0    4    0
+
+Summary:
+  Total Elapsed Time:      30
+  Total Busy Time:         27
+  Total Idle Time:         3
+  CPU Utilization:         90.00%
+  Average Waiting Time:    6.20
+  Average Turnaround Time: 11.60
+  Average Response Time:   3.00
+```
+
+### 7.5 Educational Simulation Disclaimer
+
+> [!IMPORTANT]
+> The `schedule` command is purely a **user-space educational simulation**.
+> - It does **not** alter, replace, or interact with Linux's real kernel CPU scheduler (such as CFS/EEVDF).
+> - It does **not** spawn real Linux processes (`fork()`, `clone()`, `exec()`), send OS signals (`kill()`, `SIGSTOP`, `SIGCONT`), or manipulate terminal control groups (`tcsetpgrp()`).
+> - It does **not** use real-time sleep calls (`sleep()`, `nanosleep()`, `usleep()`) to advance time; virtual time is represented as deterministic discrete integers and computed mathematically.
+> - Real shell jobs and background pipelines executed by SmartShell continue to be scheduled solely by the Linux operating system kernel.
