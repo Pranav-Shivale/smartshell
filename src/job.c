@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 
 /* Bounded job table structure */
 typedef struct {
@@ -357,11 +358,84 @@ void job_table_print(void)
 {
     for (int i = 0; i < MAX_JOBS; i++) {
         const job_t *job = g_job_table.jobs[i];
-        if (job != NULL) {
+        if (job != NULL && job->state != JOB_COMPLETED) {
             printf("[%d]  %-10s %s\n",
                    job->jid,
                    job_state_to_string(job->state),
                    job->command_line);
         }
     }
+}
+
+void job_notify_and_cleanup(void)
+{
+    for (int i = 0; i < MAX_JOBS; i++) {
+        job_t *job = g_job_table.jobs[i];
+        if (job == NULL || job->is_foreground) {
+            continue;
+        }
+
+        if (job->state == JOB_COMPLETED) {
+            if (!job->notified) {
+                /* Check if any process in the pipeline terminated due to a signal */
+                int term_sig = 0;
+                for (int p = 0; p < job->process_count; p++) {
+                    if (WIFSIGNALED(job->processes[p].status)) {
+                        term_sig = WTERMSIG(job->processes[p].status);
+                        break;
+                    }
+                }
+
+                if (term_sig != 0) {
+                    if (term_sig == SIGTERM) {
+                        printf("[%d]+  Terminated              %s\n", job->jid, job->command_line);
+                    } else if (term_sig == SIGKILL) {
+                        printf("[%d]+  Killed                  %s\n", job->jid, job->command_line);
+                    } else if (term_sig == SIGINT) {
+                        printf("[%d]+  Interrupt               %s\n", job->jid, job->command_line);
+                    } else {
+                        printf("[%d]+  Signal %d               %s\n", job->jid, term_sig, job->command_line);
+                    }
+                } else {
+                    printf("[%d]+  Done                    %s\n", job->jid, job->command_line);
+                }
+                fflush(stdout);
+                job->notified = true;
+            }
+            job_remove(job->jid);
+        } else if (job->state == JOB_STOPPED) {
+            if (!job->notified) {
+                printf("[%d]+  Stopped                 %s\n", job->jid, job->command_line);
+                fflush(stdout);
+                job->notified = true;
+            }
+        }
+    }
+}
+
+job_t *job_get_current(void)
+{
+    job_t *latest_stopped = NULL;
+    job_t *latest_running = NULL;
+
+    for (int i = 0; i < MAX_JOBS; i++) {
+        job_t *job = g_job_table.jobs[i];
+        if (job == NULL) {
+            continue;
+        }
+        if (job->state == JOB_STOPPED) {
+            if (latest_stopped == NULL || job->jid > latest_stopped->jid) {
+                latest_stopped = job;
+            }
+        } else if (job->state == JOB_RUNNING) {
+            if (latest_running == NULL || job->jid > latest_running->jid) {
+                latest_running = job;
+            }
+        }
+    }
+
+    if (latest_stopped != NULL) {
+        return latest_stopped;
+    }
+    return latest_running;
 }

@@ -52,6 +52,7 @@ typedef enum {
     TOK_REDIR_OUT,     /* > */
     TOK_REDIR_APPEND,  /* >> */
     TOK_REDIR_ERR,     /* 2> */
+    TOK_BG,            /* & */
     TOK_EOF            /* end of input line */
 } token_type_t;
 
@@ -147,7 +148,20 @@ static bool tokenize(const char *line, token_array_t *ta, const char **errmsg)
             continue;
         }
 
-        /* 7. Read a word (argument or filename) */
+        /* 7. Check for & */
+        if (*p == '&') {
+            if (*(p + 1) == '&') {
+                if (errmsg != NULL) {
+                    *errmsg = "syntax error: unexpected token '&&'";
+                }
+                return false;
+            }
+            token_array_append(ta, TOK_BG, NULL);
+            p++;
+            continue;
+        }
+
+        /* 8. Read a word (argument or filename) */
         token_buf_t buf;
         token_buf_init(&buf);
         bool in_word = false;
@@ -156,7 +170,7 @@ static bool tokenize(const char *line, token_array_t *ta, const char **errmsg)
             if (isspace((unsigned char)*p)) {
                 break;
             }
-            if (*p == '|' || *p == '<' || *p == '>') {
+            if (*p == '|' || *p == '<' || *p == '>' || *p == '&') {
                 break;
             }
             if (*p == '2' && *(p + 1) == '>') {
@@ -346,6 +360,35 @@ command_t *parse_command(const char *line, const char **errmsg)
                     stage_done = true;
                     break;
 
+                case TOK_BG:
+                    i++; /* consume & */
+                    /* & must be followed by TOK_EOF */
+                    if (i >= ta.count || ta.tokens[i].type != TOK_EOF) {
+                        if (errmsg != NULL) {
+                            *errmsg = "syntax error: unexpected token '&'";
+                        }
+                        free_command(cmd);
+                        free_command(head);
+                        token_array_free(&ta);
+                        return NULL;
+                    }
+
+                    /* Stage before & cannot be empty */
+                    if (cmd->argc == 0 && cmd->input_file == NULL &&
+                        cmd->output_file == NULL && cmd->error_file == NULL) {
+                        if (errmsg != NULL) {
+                            *errmsg = "syntax error: unexpected token '&'";
+                        }
+                        free_command(cmd);
+                        free_command(head);
+                        token_array_free(&ta);
+                        return NULL;
+                    }
+
+                    cmd->is_background = true;
+                    stage_done = true;
+                    break;
+
                 case TOK_EOF:
                     stage_done = true;
                     break;
@@ -379,6 +422,20 @@ command_t *parse_command(const char *line, const char **errmsg)
             free_command(head);
             token_array_free(&ta);
             return NULL;
+        }
+    }
+
+    /* If any command in the pipeline has is_background set, propagate to the entire pipeline */
+    bool is_bg = false;
+    for (command_t *c = head; c != NULL; c = c->pipe_next) {
+        if (c->is_background) {
+            is_bg = true;
+            break;
+        }
+    }
+    if (is_bg) {
+        for (command_t *c = head; c != NULL; c = c->pipe_next) {
+            c->is_background = true;
         }
     }
 

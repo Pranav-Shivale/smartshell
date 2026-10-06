@@ -171,7 +171,7 @@ int execute_pipeline(const command_t *cmd, const char *cmdline)
     }
 
     /* Register the pipeline as one logical job in the job table */
-    bool is_foreground = true;
+    bool is_foreground = !cmd->is_background;
     job_t *job = job_create(pids, cmd, num_cmds, cmdline, is_foreground);
 
     /* Transfer terminal ownership to the child process group before waiting */
@@ -198,7 +198,15 @@ int execute_pipeline(const command_t *cmd, const char *cmdline)
                 job_remove(job->jid);
             } else if (job_is_stopped(job)) {
                 printf("\n[%d]+  Stopped  %s\n", job->jid, job->command_line);
+                job->is_foreground = false;
+                job->notified = true;
             }
+        }
+    } else {
+        /* Background job: print start notification and do not wait */
+        if (job != NULL) {
+            printf("[%d] %d\n", job->jid, (int)pids[0]);
+            fflush(stdout);
         }
     }
 

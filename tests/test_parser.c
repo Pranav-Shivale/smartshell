@@ -159,6 +159,86 @@ static void test_trailing_backslash(void)
     ASSERT_EQ_STR("trailing backslash", err);
 }
 
+static void test_background_parsing(void)
+{
+    const char *err = NULL;
+
+    /* 1. Trailing & with space */
+    command_t *cmd = parse_command("sleep 10 &", &err);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_NULL(err);
+    ASSERT_EQ_INT(2, cmd->argc);
+    ASSERT_EQ_STR("sleep", cmd->argv[0]);
+    ASSERT_EQ_STR("10", cmd->argv[1]);
+    ASSERT_NULL(cmd->argv[2]);
+    ASSERT_TRUE(cmd->is_background);
+    ASSERT_NULL(cmd->pipe_next);
+    free_command(cmd);
+
+    /* 2. Trailing & without space */
+    cmd = parse_command("sleep 10&", &err);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_NULL(err);
+    ASSERT_EQ_INT(2, cmd->argc);
+    ASSERT_EQ_STR("sleep", cmd->argv[0]);
+    ASSERT_EQ_STR("10", cmd->argv[1]);
+    ASSERT_TRUE(cmd->is_background);
+    free_command(cmd);
+
+    /* 3. Pipeline with trailing & */
+    cmd = parse_command("sleep 10 | cat &", &err);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_NULL(err);
+    ASSERT_TRUE(cmd->is_background);
+    ASSERT_NOT_NULL(cmd->pipe_next);
+    ASSERT_TRUE(cmd->pipe_next->is_background);
+    ASSERT_EQ_STR("sleep", cmd->argv[0]);
+    ASSERT_EQ_STR("cat", cmd->pipe_next->argv[0]);
+    free_command(cmd);
+
+    /* 4. Quoted & remains literal */
+    cmd = parse_command("echo \"hello &\"", &err);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_NULL(err);
+    ASSERT_EQ_INT(2, cmd->argc);
+    ASSERT_EQ_STR("hello &", cmd->argv[1]);
+    ASSERT_FALSE(cmd->is_background);
+    free_command(cmd);
+
+    cmd = parse_command("echo '&'", &err);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_NULL(err);
+    ASSERT_EQ_INT(2, cmd->argc);
+    ASSERT_EQ_STR("&", cmd->argv[1]);
+    ASSERT_FALSE(cmd->is_background);
+    free_command(cmd);
+
+    /* 5. Syntax errors */
+    cmd = parse_command("&", &err);
+    ASSERT_NULL(cmd);
+    ASSERT_NOT_NULL(err);
+
+    cmd = parse_command("sleep 10 &&", &err);
+    ASSERT_NULL(cmd);
+    ASSERT_NOT_NULL(err);
+
+    cmd = parse_command("sleep 10 & &", &err);
+    ASSERT_NULL(cmd);
+    ASSERT_NOT_NULL(err);
+
+    cmd = parse_command("sleep 10 & foo", &err);
+    ASSERT_NULL(cmd);
+    ASSERT_NOT_NULL(err);
+
+    cmd = parse_command("sleep 10 & | cat", &err);
+    ASSERT_NULL(cmd);
+    ASSERT_NOT_NULL(err);
+
+    cmd = parse_command("sleep 10 | &", &err);
+    ASSERT_NULL(cmd);
+    ASSERT_NOT_NULL(err);
+}
+
 int main(void)
 {
     TEST_INIT();
@@ -175,6 +255,7 @@ int main(void)
     RUN_TEST(test_unclosed_single_quote);
     RUN_TEST(test_unclosed_double_quote);
     RUN_TEST(test_trailing_backslash);
+    RUN_TEST(test_background_parsing);
 
     TEST_REPORT();
 }

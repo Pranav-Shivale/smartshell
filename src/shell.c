@@ -75,6 +75,7 @@ int shell_run(void)
     for (;;) {
         /* Process any asynchronous child events before displaying prompt */
         signals_process_chld_events();
+        job_notify_and_cleanup();
 
         if (!display_prompt()) {
             break;
@@ -104,63 +105,82 @@ int shell_run(void)
         /* Check if single command and built-in */
         if (cmd->pipe_next == NULL && cmd->argv != NULL &&
             cmd->argv[0] != NULL && is_builtin(cmd->argv[0])) {
-            int saved_stdin = -1;
-            int saved_stdout = -1;
-            int saved_stderr = -1;
-            bool redir_error = false;
 
-            if (cmd->input_file != NULL) {
-                saved_stdin = dup(STDIN_FILENO);
-            }
-            if (cmd->output_file != NULL) {
-                saved_stdout = dup(STDOUT_FILENO);
-            }
-            if (cmd->error_file != NULL) {
-                saved_stderr = dup(STDERR_FILENO);
-            }
-
-            if (setup_redirections(cmd) < 0) {
-                redir_error = true;
+            /* Reject stateful / job-control built-ins in the background */
+            if (cmd->is_background &&
+                (strcmp(cmd->argv[0], "cd") == 0 ||
+                 strcmp(cmd->argv[0], "exit") == 0 ||
+                 strcmp(cmd->argv[0], "quit") == 0 ||
+                 strcmp(cmd->argv[0], "fg") == 0 ||
+                 strcmp(cmd->argv[0], "bg") == 0)) {
+                fprintf(stderr, "smartshell: %s: cannot run in background\n", cmd->argv[0]);
                 last_status = 1;
+                free_command(cmd);
+                continue;
             }
 
-            if (!redir_error) {
-                bool should_exit = false;
-                int exit_code = 0;
-                last_status = execute_builtin(cmd, &should_exit, &exit_code);
-                if (should_exit) {
-                    if (saved_stdin != -1) {
-                        dup2(saved_stdin, STDIN_FILENO);
-                        close(saved_stdin);
-                    }
-                    if (saved_stdout != -1) {
-                        dup2(saved_stdout, STDOUT_FILENO);
-                        close(saved_stdout);
-                    }
-                    if (saved_stderr != -1) {
-                        dup2(saved_stderr, STDERR_FILENO);
-                        close(saved_stderr);
-                    }
-                    free_command(cmd);
-                    shell_restore_terminal();
-                    signals_cleanup();
-                    job_table_cleanup();
-                    return exit_code;
+            if (!cmd->is_background) {
+                int saved_stdin = -1;
+                int saved_stdout = -1;
+                int saved_stderr = -1;
+                bool redir_error = false;
+
+                if (cmd->input_file != NULL) {
+                    saved_stdin = dup(STDIN_FILENO);
                 }
-            }
+                if (cmd->output_file != NULL) {
+                    saved_stdout = dup(STDOUT_FILENO);
+                }
+                if (cmd->error_file != NULL) {
+                    saved_stderr = dup(STDERR_FILENO);
+                }
 
-            /* Restore saved file descriptors */
-            if (saved_stdin != -1) {
-                dup2(saved_stdin, STDIN_FILENO);
-                close(saved_stdin);
-            }
-            if (saved_stdout != -1) {
-                dup2(saved_stdout, STDOUT_FILENO);
-                close(saved_stdout);
-            }
-            if (saved_stderr != -1) {
-                dup2(saved_stderr, STDERR_FILENO);
-                close(saved_stderr);
+                if (setup_redirections(cmd) < 0) {
+                    redir_error = true;
+                    last_status = 1;
+                }
+
+                if (!redir_error) {
+                    bool should_exit = false;
+                    int exit_code = 0;
+                    last_status = execute_builtin(cmd, &should_exit, &exit_code);
+                    if (should_exit) {
+                        if (saved_stdin != -1) {
+                            dup2(saved_stdin, STDIN_FILENO);
+                            close(saved_stdin);
+                        }
+                        if (saved_stdout != -1) {
+                            dup2(saved_stdout, STDOUT_FILENO);
+                            close(saved_stdout);
+                        }
+                        if (saved_stderr != -1) {
+                            dup2(saved_stderr, STDERR_FILENO);
+                            close(saved_stderr);
+                        }
+                        free_command(cmd);
+                        shell_restore_terminal();
+                        signals_cleanup();
+                        job_table_cleanup();
+                        return exit_code;
+                    }
+                }
+
+                /* Restore saved file descriptors */
+                if (saved_stdin != -1) {
+                    dup2(saved_stdin, STDIN_FILENO);
+                    close(saved_stdin);
+                }
+                if (saved_stdout != -1) {
+                    dup2(saved_stdout, STDOUT_FILENO);
+                    close(saved_stdout);
+                }
+                if (saved_stderr != -1) {
+                    dup2(saved_stderr, STDERR_FILENO);
+                    close(saved_stderr);
+                }
+            } else {
+                /* Background stateless built-in executed via pipeline fork */
+                last_status = execute_pipeline(cmd, input);
             }
         } else {
             last_status = execute_pipeline(cmd, input);

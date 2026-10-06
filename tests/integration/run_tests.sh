@@ -66,6 +66,13 @@ run_test "jobs built-in empty" "jobs" "smartshell>"
 run_test "rapid command sequence in non-interactive mode" "$(printf 'echo one\necho two\necho three' )" "three"
 run_test "pipeline error code propagation" "false | true" "smartshell>"
 
+# 7. Phase 6 Background execution and job control
+run_test "background single job start" "sleep 1 &" "[1]"
+run_test "background job shows in jobs" "$(printf 'sleep 2 &\njobs')" "Running"
+run_test "background pipeline shows in jobs" "$(printf 'sleep 2 | cat &\njobs')" "sleep 2 | cat"
+run_test "stateful builtin rejects background" "cd /tmp &" "cannot run in background"
+run_test "exit builtin rejects background" "exit &" "cannot run in background"
+
 echo ""
 echo "=== Integration Test Results: $((passed + failed)) run, $passed passed, $failed failed ==="
 

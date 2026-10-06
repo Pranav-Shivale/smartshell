@@ -136,4 +136,18 @@ void job_table_print(void);
  */
 const char *job_state_to_string(job_state_t state);
 
+/*
+ * Check all non-foreground jobs in the table:
+ * - print notifications for newly completed or stopped background jobs
+ * - safely remove and free completed background jobs
+ */
+void job_notify_and_cleanup(void);
+
+/*
+ * Get the current default job (for fg/bg without arguments).
+ * Priority: highest JID stopped job; if none, highest JID running job.
+ * Returns job_t pointer, or NULL if no active jobs exist.
+ */
+job_t *job_get_current(void);
+
 #endif /* SMARTSHELL_JOB_H */
