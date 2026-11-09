@@ -289,6 +289,101 @@ static void test_builtin_schedule_determinism(void)
     free_command(cmd2);
 }
 
+static void test_builtin_schedule_compare(void)
+{
+    int rc = -1;
+    command_t *cmd = parse_command("schedule compare demo", NULL);
+    ASSERT_NOT_NULL(cmd);
+    char *out = capture_builtin_output(cmd, &rc);
+    ASSERT_NOT_NULL(out);
+    ASSERT_EQ_INT(0, rc);
+
+    ASSERT_TRUE(strstr(out, "SmartShell CPU Scheduling Algorithm Comparison") != NULL);
+    ASSERT_TRUE(strstr(out, "First-Come, First-Served (FCFS)") != NULL);
+    ASSERT_TRUE(strstr(out, "Shortest Job First (SJF)") != NULL);
+    ASSERT_TRUE(strstr(out, "Round Robin (RR, Q=4)") != NULL);
+    ASSERT_TRUE(strstr(out, "Non-Preemptive Priority") != NULL);
+    ASSERT_TRUE(strstr(out, "Multilevel Feedback Queue (MLFQ)") != NULL);
+    ASSERT_TRUE(strstr(out, "Avg Waiting") != NULL);
+    ASSERT_TRUE(strstr(out, "Avg Turnaround") != NULL);
+    ASSERT_TRUE(strstr(out, "Round Robin Quantum:     4 ticks") != NULL);
+
+    free(out);
+    free_command(cmd);
+
+    /* Test compare with custom quantum */
+    cmd = parse_command("schedule compare demo 2", NULL);
+    ASSERT_NOT_NULL(cmd);
+    out = capture_builtin_output(cmd, &rc);
+    ASSERT_NOT_NULL(out);
+    ASSERT_EQ_INT(0, rc);
+
+    ASSERT_TRUE(strstr(out, "Round Robin (RR, Q=2)") != NULL);
+    ASSERT_TRUE(strstr(out, "Round Robin Quantum:     2 ticks") != NULL);
+
+    free(out);
+    free_command(cmd);
+
+    /* Test compare with direct quantum argument */
+    cmd = parse_command("schedule compare 6", NULL);
+    ASSERT_NOT_NULL(cmd);
+    out = capture_builtin_output(cmd, &rc);
+    ASSERT_NOT_NULL(out);
+    ASSERT_EQ_INT(0, rc);
+
+    ASSERT_TRUE(strstr(out, "Round Robin (RR, Q=6)") != NULL);
+    ASSERT_TRUE(strstr(out, "Round Robin Quantum:     6 ticks") != NULL);
+
+    free(out);
+    free_command(cmd);
+}
+
+static void test_builtin_schedule_compare_and_custom_errors(void)
+{
+    bool should_exit = false;
+    int exit_code = 0;
+
+    /* Extra arguments to schedule custom */
+    command_t *cmd = parse_command("schedule custom extra", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Extra arguments to schedule compare demo */
+    cmd = parse_command("schedule compare demo 4 extra", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Invalid quantum in schedule compare demo */
+    cmd = parse_command("schedule compare demo 0", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    cmd = parse_command("schedule compare demo -5", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    cmd = parse_command("schedule compare demo 200", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Unknown compare argument */
+    cmd = parse_command("schedule compare invalid_opt", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+}
+
 int main(void)
 {
     TEST_INIT();
@@ -303,6 +398,8 @@ int main(void)
     RUN_TEST(test_builtin_schedule_errors);
     RUN_TEST(test_builtin_schedule_output_capture);
     RUN_TEST(test_builtin_schedule_determinism);
+    RUN_TEST(test_builtin_schedule_compare);
+    RUN_TEST(test_builtin_schedule_compare_and_custom_errors);
 
     TEST_REPORT();
 }

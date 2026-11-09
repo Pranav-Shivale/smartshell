@@ -27,6 +27,12 @@
 #define SCHED_MLFQ_Q1_QUANTUM     8
 #define SCHED_MLFQ_BOOST_INTERVAL 200
 
+/* Maximum number of processes supported in custom scheduling workloads */
+#define SCHED_MAX_CUSTOM_PROCESSES 32
+
+/* Default maximum line column width for wrapped Gantt charts */
+#define SCHED_GANTT_DEFAULT_MAX_COLS 76
+
 /*
  * Virtual process representation.
  * All timing metrics use simulated integer units.
@@ -161,6 +167,51 @@ int sched_compute_metrics(sched_result_t *result);
 const sched_process_t *sched_result_get_proc(const sched_result_t *result, int pid);
 
 /*
+ * Scheduling algorithm comparison result container.
+ * Stores simulation outcomes across all five scheduling algorithms
+ * evaluated on identical workload configurations.
+ */
+typedef struct {
+    sched_result_t fcfs;
+    sched_result_t sjf;
+    sched_result_t rr;
+    sched_result_t priority;
+    sched_result_t mlfq;
+    int            rr_quantum;
+    int            process_count;
+    int            total_burst_time;
+} sched_compare_result_t;
+
+/* Comparison lifecycle management */
+void sched_compare_result_init(sched_compare_result_t *cmp);
+void sched_compare_result_free(sched_compare_result_t *cmp);
+
+/*
+ * Run all five scheduling algorithms on an identical copy of the workload.
+ * Parameters:
+ *   procs      - array of virtual processes
+ *   count      - number of processes in workload
+ *   rr_quantum - Round Robin quantum (> 0)
+ *   cmp        - pointer to comparison result container
+ * Returns 0 on success, -1 on invalid input.
+ */
+int sched_compare_all(const sched_process_t *procs, int count, int rr_quantum,
+                      sched_compare_result_t *cmp);
+
+/*
+ * Render algorithm comparison table into a dynamically allocated string.
+ * Returns an allocated string that caller must free(), or NULL on error.
+ */
+char *sched_render_comparison(const sched_compare_result_t *cmp);
+
+/*
+ * Render algorithm comparison table into caller-provided buffer.
+ * Returns the number of characters formatted (excluding terminating null byte),
+ * or -1 on error.
+ */
+int sched_render_comparison_buf(const sched_compare_result_t *cmp, char *buf, size_t size);
+
+/*
  * Render execution timeline into a formatted textual Gantt chart string.
  * Returns an allocated string that caller must free(), or NULL on error.
  */
@@ -172,5 +223,19 @@ char *sched_render_gantt(const sched_result_t *result);
  * or -1 on error.
  */
 int sched_render_gantt_buf(const sched_result_t *result, char *buf, size_t size);
+
+/*
+ * Render execution timeline wrapped across multiple rows based on max_cols.
+ * Slices that would exceed max_cols wrap into an aligned next tier.
+ * Returns an allocated string that caller must free(), or NULL on error.
+ */
+char *sched_render_gantt_wrapped(const sched_result_t *result, int max_cols);
+
+/*
+ * Render wrapped execution timeline into caller-provided buffer.
+ * Returns the number of characters formatted (excluding terminating null byte),
+ * or -1 on error.
+ */
+int sched_render_gantt_wrapped_buf(const sched_result_t *result, char *buf, size_t size, int max_cols);
 
 #endif /* SMARTSHELL_SCHEDULER_H */
