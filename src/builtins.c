@@ -32,6 +32,8 @@ bool is_builtin(const char *name)
             strcmp(name, "bg") == 0 ||
             strcmp(name, "kill") == 0 ||
             strcmp(name, "monitor") == 0 ||
+            strcmp(name, "process-tree") == 0 ||
+            strcmp(name, "sysinfo") == 0 ||
             strcmp(name, "schedule") == 0);
 }
 
@@ -82,6 +84,9 @@ static int builtin_help(void)
     printf("  bg [%%jid]      Resume a stopped job in the background\n");
     printf("  kill [-sig] <pid|%%jid> Send a signal to a process or job\n");
     printf("  monitor [pid]  Monitor system overview, shell jobs, or process details via /proc\n");
+    printf("                 Options: --watch (-w), --sort cpu|memory (-s cpu|memory)\n");
+    printf("  process-tree [pid] Display process hierarchy tree from /proc\n");
+    printf("  sysinfo        Display system hardware, OS, memory and shell information\n");
     printf("  schedule <alg> Simulate CPU scheduling algorithms (fcfs, sjf, rr, priority, mlfq, custom, compare)\n");
     printf("  help           Display this help message\n");
     printf("  exit [code]    Exit the shell with optional status (0-255)\n");
@@ -889,6 +894,12 @@ int execute_builtin(const command_t *cmd, bool *should_exit, int *exit_code)
     }
     if (strcmp(name, "monitor") == 0) {
         return builtin_monitor(cmd);
+    }
+    if (strcmp(name, "process-tree") == 0) {
+        return builtin_process_tree(cmd);
+    }
+    if (strcmp(name, "sysinfo") == 0) {
+        return builtin_sysinfo(cmd);
     }
     if (strcmp(name, "schedule") == 0) {
         return builtin_schedule(cmd);

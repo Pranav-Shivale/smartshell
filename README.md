@@ -32,10 +32,12 @@ SmartShell provides a complete, modern academic implementation of fundamental op
 - **Built-in Commands**:
   - `cd` (supports `$HOME` and `cd -`), `pwd`, `exit`, `quit`, `help`.
   - Fully integrated with I/O redirections.
-- **Linux `/proc` Process Monitoring**:
-  - Inspection of `/proc/<pid>/stat`, `/proc/<pid>/status`, and `/proc/meminfo`.
-  - Live CPU utilization sampling over a 100ms delta window via `/proc/stat`.
-  - Detailed memory accounting (virtual address space, resident set size RSS).
+- **Linux `/proc` Process Monitoring & System Explorer**:
+  - Full process hierarchy tree visualization (`process-tree` and `process-tree <pid>`) with loop and cycle protection.
+  - Interactive live watch mode (`monitor --watch`) refreshing every second with terminal restoration on exit.
+  - System-wide process explorer with dynamic CPU and memory sorting (`monitor --sort cpu`, `monitor --sort memory`).
+  - Detailed single-process inspection (`monitor <pid>`) and shell-managed job accounting.
+  - Host hardware, kernel, memory, and shell runtime environment reporting (`sysinfo`).
 - **Educational CPU Scheduling Laboratory**:
   - Pure user-space discrete integer-time simulator.
   - Implements **FCFS**, **SJF**, **Round Robin (RR)**, non-preemptive **Priority**, and **Multilevel Feedback Queue (MLFQ)**.
@@ -143,7 +145,7 @@ smartshell> kill %1
 [1]+  Terminated  sleep 30 &
 ```
 
-### 4. Linux `/proc` Monitoring
+### 4. Linux `/proc` Monitoring & System Explorer
 ```sh
 # System overview and managed jobs
 smartshell> monitor
@@ -161,6 +163,35 @@ Process Information (PID 1):
   User CPU Time:      12 ticks (0.12s)
   System CPU Time:    25 ticks (0.25s)
   CPU Utilization:    0.0% (sampled over 100ms)
+
+# Sort system processes by CPU utilization
+smartshell> monitor --sort cpu
+
+# Sort system processes by physical memory (RSS)
+smartshell> monitor --sort memory
+
+# Live full-screen monitor refreshing every second (press 'q' to quit)
+smartshell> monitor --watch
+
+# Display complete process hierarchy tree
+smartshell> process-tree
+
+# Display subtree rooted at specific PID
+smartshell> process-tree 1
+
+# Comprehensive real-time system and runtime explorer
+smartshell> sysinfo
+SmartShell System Information
+=============================
+Operating System:     Linux 6.6.137+
+Kernel Version:       #42~24.04.1-Ubuntu SMP PREEMPT_DYNAMIC
+Machine Architecture: x86_64
+CPU Cores:            16 online
+Total Memory:         15.31 GB (16056732 kB)
+Available Memory:     10.69 GB (11210616 kB)
+SmartShell PID:       35
+Terminal Mode:        Interactive (/dev/pts/1, foreground PGID: 35)
+/proc Accessibility:  Accessible (virtual filesystem mounted and readable)
 ```
 
 ### 5. CPU Scheduling Laboratory
@@ -222,7 +253,7 @@ The simulator outputs a text-based Gantt chart with precise tick markers and mul
 SmartShell contains a comprehensive, multi-tiered test suite:
 
 ```bash
-# 1. Run all unit tests (137 unit tests across 8 suites)
+# 1. Run all unit tests (145 unit tests across 8 suites)
 make test
 
 # 2. Run unit tests under AddressSanitizer and UndefinedBehaviorSanitizer
@@ -232,7 +263,7 @@ make test-asan
 make test-integration
 ```
 
-All 137 unit tests, 66 integration tests, and 13 pseudo-terminal (PTY) job-control tests pass with 0 failures and zero sanitizer errors.
+All 145 unit tests, 90 integration tests, and 14 pseudo-terminal (PTY) job-control tests pass with 0 failures and zero sanitizer errors.
 
 ---
 

@@ -124,6 +124,34 @@ run_test "schedule custom invalid priority negative" "$(printf 'schedule custom\
 run_test "schedule custom EOF handling" "$(printf 'schedule custom\n')" "smartshell>"
 run_test "schedule custom extra argument error" "schedule custom extra" "too many arguments"
 
+# 11. Phase 11 Process & System Explorer
+run_test "process-tree full output" "process-tree" "["
+run_test "process-tree PID 1" "process-tree 1" "1 "
+run_test "process-tree in pipeline" "process-tree | grep -c '\['" ""
+run_test "process-tree with redirection" "$(printf 'process-tree > %s/ptree.txt\ngrep -c "\\[" %s/ptree.txt' "$TMP_DIR" "$TMP_DIR")" ""
+run_test "process-tree invalid string PID" "process-tree abc" "invalid process ID"
+run_test "process-tree negative PID" "process-tree -5" "invalid process ID"
+run_test "process-tree nonexistent PID" "process-tree 9999999" "not found"
+run_test "process-tree too many arguments" "process-tree 1 2" "too many arguments"
+
+run_test "sysinfo basic output" "sysinfo" "SmartShell System Information"
+run_test "sysinfo operating system field" "sysinfo" "Operating System:"
+run_test "sysinfo architecture field" "sysinfo" "Machine Architecture:"
+run_test "sysinfo in pipeline" "sysinfo | grep Architecture" "Architecture"
+run_test "sysinfo with redirection" "$(printf 'sysinfo > %s/sys.txt\ngrep PID %s/sys.txt' "$TMP_DIR" "$TMP_DIR")" "SmartShell PID:"
+run_test "sysinfo extra arguments error" "sysinfo extra" "too many arguments"
+
+run_test "monitor sort cpu" "monitor --sort cpu" "sorted by CPU"
+run_test "monitor sort memory" "monitor --sort memory" "sorted by Memory"
+run_test "monitor sort short flag -s cpu" "monitor -s cpu" "sorted by CPU"
+run_test "monitor sort short flag -s mem" "monitor -s mem" "sorted by Memory"
+run_test "monitor in pipeline" "monitor --sort cpu | grep -i 'Overview'" "Overview"
+run_test "monitor with redirection" "$(printf 'monitor --sort cpu > %s/mon.txt\ngrep CPU %s/mon.txt' "$TMP_DIR" "$TMP_DIR")" "CPU"
+run_test "monitor invalid sort option" "monitor --sort invalid" "invalid sort field"
+run_test "monitor missing sort argument" "monitor --sort" "requires an argument"
+run_test "monitor unrecognized option" "monitor --unknown" "unrecognized option"
+run_test "monitor watch batch mode" "monitor --watch" "Refresh"
+
 echo ""
 echo "=== Integration Test Results: $((passed + failed)) run, $passed passed, $failed failed ==="
 

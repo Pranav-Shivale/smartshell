@@ -79,4 +79,43 @@ int proc_monitor_display_summary(void);
 int proc_monitor_display_pid(pid_t pid);
 int builtin_monitor(const command_t *cmd);
 
+/* Sorting modes for process monitor */
+typedef enum {
+    PROC_SORT_CPU = 0,
+    PROC_SORT_MEM = 1
+} proc_sort_mode_t;
+
+/* Extended process monitor functions */
+int proc_monitor_display_sorted(proc_sort_mode_t sort_mode);
+int proc_monitor_watch(proc_sort_mode_t sort_mode, pid_t target_pid);
+
+/* Process Tree node and hierarchy structure */
+typedef struct proc_tree_node {
+    pid_t                   pid;
+    pid_t                   ppid;
+    char                    name[PROC_NAME_MAX];
+    char                    state_char;
+    struct proc_tree_node **children;
+    size_t                  num_children;
+    size_t                  children_cap;
+    bool                    visited;
+} proc_tree_node_t;
+
+typedef struct {
+    proc_tree_node_t **nodes;
+    size_t             count;
+    size_t             capacity;
+} proc_tree_t;
+
+/* Process tree functions */
+proc_tree_t *proc_tree_collect(void);
+void proc_tree_free(proc_tree_t *tree);
+proc_tree_node_t *proc_tree_find_node(const proc_tree_t *tree, pid_t pid);
+int proc_tree_display(pid_t target_pid);
+int builtin_process_tree(const command_t *cmd);
+
+/* System information explorer functions */
+int proc_display_sysinfo(void);
+int builtin_sysinfo(const command_t *cmd);
+
 #endif /* SMARTSHELL_PROC_MONITOR_H */
