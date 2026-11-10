@@ -79,22 +79,26 @@ SmartShell is structured into cleanly decoupled, modular components:
 - **User Job Control**: Full implementation of `jobs`, `fg %N`, `bg %N`, and `kill %N` or `kill -SIGNAL PID/%N`.
 
 ### 2.5 Built-in Commands (`builtins.c`, `builtins.h`)
-- `cd [dir]`: Changes directory (supports `$HOME` default and `cd -` previous directory).
+- `cd [dir|-]`: Changes directory (supports `$HOME` default, `~`, and `cd -` for `$OLDPWD`).
 - `pwd`: Outputs current working directory via `getcwd()`.
-- `exit` / `quit [code]`: Cleanly terminates shell session.
+- `exit` / `quit [code]`: Cleanly terminates shell session with optional status.
 - `help`: Interactive documentation of available commands.
 - `jobs`: Lists active background and stopped jobs.
 - `fg [job_spec]`: Resumes or brings job to foreground.
 - `bg [job_spec]`: Resumes stopped job in background.
 - `kill [-sig] <pid|job_spec>`: Sends signals to processes or process groups.
-- `monitor [pid]`: Dispatches to `/proc` monitoring engine.
-- `schedule <algo> [args]`: Dispatches to CPU scheduling simulation laboratory.
+- `monitor [pid]`: Dispatches to `/proc` monitoring engine (supports `--watch` and `--sort cpu|memory`).
+- `process-tree [pid]`: Displays `/proc` process hierarchy tree with cycle prevention.
+- `sysinfo`: Displays real hardware, OS, memory, and shell runtime environment metrics.
+- `schedule <algo> [args]`: Dispatches to CPU scheduling simulation laboratory (supports `custom` workloads and `compare` table).
 
-### 2.6 Linux `/proc` Process Monitor (`proc_monitor.c`, `proc_monitor.h`)
+### 2.6 Linux `/proc` Process Monitor & System Explorer (`proc_monitor.c`, `proc_monitor.h`)
 - **Inspection Engine**: Parses virtual filesystem `/proc` without external utilities like `ps` or `top`.
 - **Process Inspection**: Reads `/proc/<pid>/stat` and `/proc/<pid>/status`, correctly parsing commands with spaces or nested parentheses.
 - **System Sampling**: Computes accurate CPU utilization from `/proc/stat` using a 100ms delta sampling window.
-- **Memory Statistics**: Extracts virtual address space, resident set size (RSS), and system memory metrics from `/proc/meminfo`.
+- **Process Hierarchy Tree**: Scans `/proc`, models parent-child relationships via `PID` and `PPID`, prevents infinite loops with visited tracking, and displays clean ASCII hierarchy trees.
+- **Live Process Monitoring**: Refreshes every 1 second in non-blocking raw terminal mode with interactive 'q'/'c'/'m' keys, automatic terminal dimension adjustment, and safe terminal restoration on exit or `SIGINT`.
+- **System Information Explorer**: Inspects host kernel, architecture, active cores, memory accounting, shell process group, and `/proc` accessibility using POSIX interfaces.
 
 ### 2.7 Educational CPU Scheduling Simulator (`scheduler.c`, `scheduler.h`)
 - **User-Space Mathematical Model**: Pure discrete integer-time simulation of CPU scheduling algorithms.
@@ -104,8 +108,10 @@ SmartShell is structured into cleanly decoupled, modular components:
   - Preemptive Round Robin (**RR**) with configurable quantum.
   - Non-preemptive static **Priority** scheduling.
   - Multilevel Feedback Queue (**MLFQ**) with 3 priority queues, quantum boundaries, and periodic starvation prevention boost.
+- **Custom Workloads (`schedule custom`)**: Interactive builder supporting 1–32 processes with strict bounds validation on arrivals, bursts, and priorities.
+- **Side-by-Side Comparison (`schedule compare`)**: Evaluates all 5 scheduling policies simultaneously on identical, unmutated workloads and produces a formatted comparative metrics table.
 - **Deterministic Virtual Time**: No system sleep, threads, signals, or kernel scheduler modifications.
-- **Presentation**: Textual Gantt chart rendering with aligned time boundaries, per-process metrics, and system summary statistics.
+- **Presentation**: Textual Gantt chart rendering with aligned time boundaries, multi-row terminal wrapping, per-process metrics, and system summary statistics.
 
 ---
 

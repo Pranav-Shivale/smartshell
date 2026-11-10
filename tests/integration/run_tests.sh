@@ -55,6 +55,8 @@ run_test "pipe and output redirect" "$(printf 'printf "3\n1\n2\n" | sort > %s/so
 # 4. Built-ins with redirection and pipes
 run_test "built-in with output redirection" "$(printf 'pwd > %s/pwd.txt\ncat %s/pwd.txt' "$TMP_DIR" "$TMP_DIR")" "smartshell"
 run_test "built-in in pipeline" "help | grep Built-in" "Built-in Commands"
+run_test "cd and cd minus toggle" "$(printf 'cd /tmp\npwd\ncd -\n' )" "/tmp"
+run_test "cd minus with unset OLDPWD error" "$(printf 'cd -\n' )" "OLDPWD not set"
 
 # 5. Syntax errors
 run_test "syntax error leading pipe" "| ls" "syntax error: unexpected token"

@@ -263,7 +263,7 @@ make test-asan
 make test-integration
 ```
 
-All 145 unit tests, 90 integration tests, and 14 pseudo-terminal (PTY) job-control tests pass with 0 failures and zero sanitizer errors.
+All 145 unit tests, 92 integration tests, and 14 pseudo-terminal (PTY) job-control tests pass with 0 failures and zero sanitizer errors.
 
 ---
 

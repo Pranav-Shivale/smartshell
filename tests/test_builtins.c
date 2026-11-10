@@ -48,18 +48,56 @@ static void test_builtin_pwd_and_cd(void)
     char original_cwd[4096];
     ASSERT_NOT_NULL(getcwd(original_cwd, sizeof(original_cwd)));
 
-    /* cd /tmp */
-    command_t *cmd = parse_command("cd /tmp", NULL);
-    ASSERT_NOT_NULL(cmd);
+    /* Ensure known baseline for OLDPWD */
+    unsetenv("OLDPWD");
 
+    /* cd - with unset OLDPWD should fail with error code 1 */
+    command_t *cmd = parse_command("cd -", NULL);
+    ASSERT_NOT_NULL(cmd);
     bool should_exit = false;
     int exit_code = 0;
     int ret = execute_builtin(cmd, &should_exit, &exit_code);
+    ASSERT_EQ_INT(1, ret);
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* cd /tmp */
+    cmd = parse_command("cd /tmp", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ret = execute_builtin(cmd, &should_exit, &exit_code);
     ASSERT_EQ_INT(0, ret);
     ASSERT_FALSE(should_exit);
     free_command(cmd);
 
     char current_cwd[4096];
+    ASSERT_NOT_NULL(getcwd(current_cwd, sizeof(current_cwd)));
+    ASSERT_EQ_STR("/tmp", current_cwd);
+    const char *oldpwd = getenv("OLDPWD");
+    ASSERT_NOT_NULL(oldpwd);
+    ASSERT_EQ_STR(original_cwd, oldpwd);
+
+    /* cd - should return to original_cwd */
+    cmd = parse_command("cd -", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ret = execute_builtin(cmd, &should_exit, &exit_code);
+    ASSERT_EQ_INT(0, ret);
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    ASSERT_NOT_NULL(getcwd(current_cwd, sizeof(current_cwd)));
+    ASSERT_EQ_STR(original_cwd, current_cwd);
+    oldpwd = getenv("OLDPWD");
+    ASSERT_NOT_NULL(oldpwd);
+    ASSERT_EQ_STR("/tmp", oldpwd);
+
+    /* cd - toggles back to /tmp */
+    cmd = parse_command("cd -", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ret = execute_builtin(cmd, &should_exit, &exit_code);
+    ASSERT_EQ_INT(0, ret);
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
     ASSERT_NOT_NULL(getcwd(current_cwd, sizeof(current_cwd)));
     ASSERT_EQ_STR("/tmp", current_cwd);
 

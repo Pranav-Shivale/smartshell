@@ -40,6 +40,9 @@ bool is_builtin(const char *name)
 static int builtin_cd(const command_t *cmd)
 {
     const char *target = NULL;
+    bool print_target = false;
+    char current_cwd[4096];
+    bool has_current_cwd = (getcwd(current_cwd, sizeof(current_cwd)) != NULL);
 
     if (cmd->argc == 1 || strcmp(cmd->argv[1], "~") == 0) {
         target = getenv("HOME");
@@ -48,7 +51,16 @@ static int builtin_cd(const command_t *cmd)
             return 1;
         }
     } else if (cmd->argc == 2) {
-        target = cmd->argv[1];
+        if (strcmp(cmd->argv[1], "-") == 0) {
+            target = getenv("OLDPWD");
+            if (target == NULL || *target == '\0') {
+                fprintf(stderr, "smartshell: cd: OLDPWD not set\n");
+                return 1;
+            }
+            print_target = true;
+        } else {
+            target = cmd->argv[1];
+        }
     } else {
         fprintf(stderr, "smartshell: cd: too many arguments\n");
         return 1;
@@ -57,6 +69,17 @@ static int builtin_cd(const command_t *cmd)
     if (chdir(target) != 0) {
         fprintf(stderr, "smartshell: cd: %s: %s\n", target, strerror(errno));
         return 1;
+    }
+
+    char new_cwd[4096];
+    if (getcwd(new_cwd, sizeof(new_cwd)) != NULL) {
+        if (has_current_cwd) {
+            setenv("OLDPWD", current_cwd, 1);
+        }
+        setenv("PWD", new_cwd, 1);
+        if (print_target) {
+            printf("%s\n", new_cwd);
+        }
     }
 
     return 0;
@@ -77,7 +100,7 @@ static int builtin_pwd(void)
 static int builtin_help(void)
 {
     printf("SmartShell — Built-in Commands:\n");
-    printf("  cd [dir]       Change the working directory (defaults to HOME)\n");
+    printf("  cd [dir|-]     Change working directory (defaults to HOME, - for OLDPWD)\n");
     printf("  pwd            Print the current working directory\n");
     printf("  jobs           List active jobs\n");
     printf("  fg [%%jid]      Bring a job to the foreground\n");
