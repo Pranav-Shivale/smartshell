@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <sys/types.h>
+#include <time.h>
 
 #include "parser.h"
 
@@ -85,6 +86,38 @@ typedef enum {
     PROC_SORT_MEM = 1
 } proc_sort_mode_t;
 
+/* Process snapshot entry */
+typedef struct {
+    pid_t         pid;
+    char          name[PROC_NAME_MAX];
+    char          state_char;
+    const char   *state_str;
+    pid_t         ppid;
+    pid_t         pgid;
+    long          num_threads;
+    unsigned long vsize_bytes;
+    unsigned long rss_bytes;
+    unsigned long utime_ticks;
+    unsigned long stime_ticks;
+    double        cpu_percent;
+} proc_snap_entry_t;
+
+/* Process snapshot container */
+typedef struct {
+    proc_snap_entry_t *entries;
+    size_t             count;
+    size_t             capacity;
+    struct timespec    timestamp;
+    sys_cpu_t          sys_cpu;
+} proc_snapshot_t;
+
+/* Process snapshot lifecycle and collection */
+proc_snapshot_t *proc_snapshot_create(void);
+void proc_snapshot_free(proc_snapshot_t *snap);
+void proc_snapshot_populate(proc_snapshot_t *snap);
+void proc_snapshot_calc_deltas(const proc_snapshot_t *prev, proc_snapshot_t *curr);
+proc_snapshot_t *proc_collect_snapshot(proc_sort_mode_t sort_mode);
+
 /* Extended process monitor functions */
 int proc_monitor_display_sorted(proc_sort_mode_t sort_mode);
 int proc_monitor_watch(proc_sort_mode_t sort_mode, pid_t target_pid);
@@ -115,6 +148,23 @@ int proc_tree_display(pid_t target_pid);
 int builtin_process_tree(const command_t *cmd);
 
 /* System information explorer functions */
+typedef struct {
+    char        os_name[64];
+    char        kernel_release[64];
+    char        kernel_version[128];
+    char        machine_arch[64];
+    long        cpus_online;
+    long        cpus_configured;
+    sys_mem_t   mem;
+    bool        has_mem;
+    pid_t       shell_pid;
+    pid_t       shell_ppid;
+    pid_t       shell_pgid;
+    pid_t       shell_sid;
+    bool        proc_accessible;
+} proc_sysinfo_t;
+
+bool proc_get_sysinfo(proc_sysinfo_t *info);
 int proc_display_sysinfo(void);
 int builtin_sysinfo(const command_t *cmd);
 

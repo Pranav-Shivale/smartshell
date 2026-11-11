@@ -248,6 +248,256 @@ def run_tests():
             assert ret != 0, f"Expected non-zero exit code on port collision, got {ret}"
         test("port already in use", test_port_collision)
 
+        auth_headers = {
+            "Host": f"127.0.0.1:{port}",
+            "Authorization": f"Bearer {server.token}"
+        }
+
+        # Test 13: GET /api/sysinfo
+        def test_sysinfo():
+            # Authorized GET
+            status, _, body = raw_http_request(port, "GET", "/api/sysinfo", headers=auth_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert "os" in data, f"Missing 'os' in {data}"
+            assert "architecture" in data, f"Missing 'architecture' in {data}"
+            assert "cpus_online" in data and data["cpus_online"] > 0, f"Invalid cpus_online in {data}"
+            assert "memory" in data and "total_kb" in data["memory"], f"Missing memory in {data}"
+            assert "shell" in data and "pid" in data["shell"], f"Missing shell in {data}"
+
+            # Unauthorized
+            status, _, _ = raw_http_request(port, "GET", "/api/sysinfo", headers={"Host": f"127.0.0.1:{port}"})
+            assert status == 401, f"Expected 401, got {status}"
+
+            # Method Not Allowed
+            status, _, _ = raw_http_request(port, "POST", "/api/sysinfo", headers=auth_headers)
+            assert status == 405, f"Expected 405, got {status}"
+        test("sysinfo endpoint (/api/sysinfo)", test_sysinfo)
+
+        # Test 14: GET /api/metrics
+        def test_metrics():
+            # Authorized GET
+            status, _, body = raw_http_request(port, "GET", "/api/metrics", headers=auth_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert "cpu_utilization" in data, f"Missing cpu_utilization in {data}"
+            assert isinstance(data["cpu_utilization"], (int, float)), f"Invalid cpu_utilization type in {data}"
+            assert "memory" in data and "available_kb" in data["memory"], f"Missing memory in {data}"
+
+            # Unauthorized
+            status, _, _ = raw_http_request(port, "GET", "/api/metrics", headers={"Host": f"127.0.0.1:{port}"})
+            assert status == 401, f"Expected 401, got {status}"
+
+            # Method Not Allowed
+            status, _, _ = raw_http_request(port, "POST", "/api/metrics", headers=auth_headers)
+            assert status == 405, f"Expected 405, got {status}"
+        test("metrics endpoint (/api/metrics)", test_metrics)
+
+        # Test 15: GET /api/processes
+        def test_processes():
+            # Default GET
+            status, _, body = raw_http_request(port, "GET", "/api/processes", headers=auth_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert data.get("sort") == "cpu"
+            assert isinstance(data.get("processes"), list)
+            assert len(data["processes"]) > 0
+
+            # Sort memory
+            status, _, body = raw_http_request(port, "GET", "/api/processes?sort=memory", headers=auth_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert data.get("sort") == "memory"
+
+            # Limit
+            status, _, body = raw_http_request(port, "GET", "/api/processes?limit=3", headers=auth_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert len(data.get("processes", [])) <= 3
+
+            # Invalid sort
+            status, _, _ = raw_http_request(port, "GET", "/api/processes?sort=invalid", headers=auth_headers)
+            assert status == 400, f"Expected 400 for invalid sort, got {status}"
+
+            # Invalid limit
+            status, _, _ = raw_http_request(port, "GET", "/api/processes?limit=abc", headers=auth_headers)
+            assert status == 400, f"Expected 400 for invalid limit, got {status}"
+
+            # Unauthorized
+            status, _, _ = raw_http_request(port, "GET", "/api/processes", headers={"Host": f"127.0.0.1:{port}"})
+            assert status == 401, f"Expected 401, got {status}"
+        test("processes endpoint (/api/processes)", test_processes)
+
+        # Test 16: GET /api/processes/:pid
+        def test_process_pid():
+            # Query server's own PID
+            srv_pid = server.proc.pid
+            status, _, body = raw_http_request(port, "GET", f"/api/processes/{srv_pid}", headers=auth_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert data.get("pid") == srv_pid
+            assert "name" in data
+            assert "state" in data
+            assert "rss_bytes" in data
+            assert "vsize_bytes" in data
+
+            # Non-existent PID
+            status, _, _ = raw_http_request(port, "GET", "/api/processes/9999999", headers=auth_headers)
+            assert status == 404, f"Expected 404, got {status}"
+
+            # Invalid PID string
+            status, _, _ = raw_http_request(port, "GET", "/api/processes/invalid_pid", headers=auth_headers)
+            assert status == 400, f"Expected 400, got {status}"
+
+            # Negative PID
+            status, _, _ = raw_http_request(port, "GET", "/api/processes/-10", headers=auth_headers)
+            assert status == 400, f"Expected 400, got {status}"
+        test("process PID endpoint (/api/processes/:pid)", test_process_pid)
+
+        # Test 17: GET /api/process-tree
+        def test_process_tree():
+            status, _, body = raw_http_request(port, "GET", "/api/process-tree", headers=auth_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert "total_nodes" in data and data["total_nodes"] > 0
+            assert "roots" in data and isinstance(data["roots"], list)
+            assert len(data["roots"]) > 0
+            root0 = data["roots"][0]
+            assert "pid" in root0
+            assert "name" in root0
+            assert "children" in root0
+
+            # Unauthorized
+            status, _, _ = raw_http_request(port, "GET", "/api/process-tree", headers={"Host": f"127.0.0.1:{port}"})
+            assert status == 401, f"Expected 401, got {status}"
+
+            # Method Not Allowed
+            status, _, _ = raw_http_request(port, "POST", "/api/process-tree", headers=auth_headers)
+            assert status == 405, f"Expected 405, got {status}"
+        test("process tree endpoint (/api/process-tree)", test_process_tree)
+
+        # Test 18: POST /api/scheduler/simulate
+        def test_scheduler_simulate():
+            sim_headers = {
+                "Host": f"127.0.0.1:{port}",
+                "Authorization": f"Bearer {server.token}",
+                "Content-Type": "application/json"
+            }
+            fcfs_payload = json.dumps({
+                "algorithm": "fcfs",
+                "processes": [
+                    {"pid": 1, "arrival_time": 0, "burst_time": 6, "priority": 2},
+                    {"pid": 2, "arrival_time": 2, "burst_time": 4, "priority": 1}
+                ]
+            })
+            status, _, body = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=fcfs_payload)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert data.get("algorithm") == "fcfs"
+            assert "summary" in data
+            assert data["summary"]["total_elapsed_time"] == 10
+            assert len(data.get("processes", [])) == 2
+            assert len(data.get("timeline", [])) >= 2
+            assert "gantt_chart" in data
+
+            # Valid RR with custom quantum
+            rr_payload = json.dumps({
+                "algorithm": "rr",
+                "quantum": 2,
+                "processes": [
+                    {"pid": 1, "arrival_time": 0, "burst_time": 5, "priority": 1},
+                    {"pid": 2, "arrival_time": 1, "burst_time": 3, "priority": 1}
+                ]
+            })
+            status, _, body = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=rr_payload)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert data.get("algorithm") == "rr"
+            assert data.get("quantum") == 2
+
+            # Valid SJF, Priority, MLFQ
+            for alg in ["sjf", "priority", "mlfq"]:
+                payload = json.dumps({
+                    "algorithm": alg,
+                    "processes": [{"pid": 1, "arrival_time": 0, "burst_time": 4, "priority": 1}]
+                })
+                status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=payload)
+                assert status == 200, f"Expected 200 for algorithm {alg}, got {status}"
+
+            # Invalid algorithm
+            bad_alg = json.dumps({"algorithm": "unknown", "processes": [{"pid": 1, "arrival_time": 0, "burst_time": 2}]})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=bad_alg)
+            assert status == 400, f"Expected 400, got {status}"
+
+            # Invalid workload (negative burst)
+            bad_workload = json.dumps({"algorithm": "fcfs", "processes": [{"pid": 1, "arrival_time": 0, "burst_time": -3}]})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=bad_workload)
+            assert status == 400, f"Expected 400, got {status}"
+
+            # Malformed JSON
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body="{bad json")
+            assert status == 400, f"Expected 400, got {status}"
+
+            # Oversized payload (>64KB)
+            huge_payload = json.dumps({"algorithm": "fcfs", "padding": "x" * 70000})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=huge_payload)
+            assert status == 413, f"Expected 413 for oversized payload, got {status}"
+
+            # Method Not Allowed
+            status, _, _ = raw_http_request(port, "GET", "/api/scheduler/simulate", headers=sim_headers)
+            assert status == 405, f"Expected 405, got {status}"
+
+            # Unauthorized
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers={"Host": f"127.0.0.1:{port}"}, body=fcfs_payload)
+            assert status == 401, f"Expected 401, got {status}"
+        test("scheduler simulate endpoint (/api/scheduler/simulate)", test_scheduler_simulate)
+
+        # Test 19: POST /api/scheduler/compare
+        def test_scheduler_compare():
+            cmp_headers = {
+                "Host": f"127.0.0.1:{port}",
+                "Authorization": f"Bearer {server.token}",
+                "Content-Type": "application/json"
+            }
+            valid_payload = json.dumps({
+                "quantum": 3,
+                "processes": [
+                    {"pid": 1, "arrival_time": 0, "burst_time": 4, "priority": 1},
+                    {"pid": 2, "arrival_time": 1, "burst_time": 5, "priority": 2},
+                    {"pid": 3, "arrival_time": 2, "burst_time": 2, "priority": 3}
+                ]
+            })
+            status, _, body = raw_http_request(port, "POST", "/api/scheduler/compare", headers=cmp_headers, body=valid_payload)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert data.get("quantum") == 3
+            assert data.get("total_processes") == 3
+            assert "results" in data
+            results = data["results"]
+            for alg in ["fcfs", "sjf", "rr", "priority", "mlfq"]:
+                assert alg in results, f"Missing {alg} in compare results"
+                assert "summary" in results[alg]
+            assert "comparison_table" in data
+
+            # Invalid payload (empty processes)
+            empty_payload = json.dumps({"processes": []})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/compare", headers=cmp_headers, body=empty_payload)
+            assert status == 400, f"Expected 400, got {status}"
+
+            # Oversized payload (>64KB)
+            huge_payload = json.dumps({"padding": "x" * 70000})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/compare", headers=cmp_headers, body=huge_payload)
+            assert status == 413, f"Expected 413, got {status}"
+
+            # Method Not Allowed
+            status, _, _ = raw_http_request(port, "GET", "/api/scheduler/compare", headers=cmp_headers)
+            assert status == 405, f"Expected 405, got {status}"
+
+            # Unauthorized
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/compare", headers={"Host": f"127.0.0.1:{port}"}, body=valid_payload)
+            assert status == 401, f"Expected 401, got {status}"
+        test("scheduler compare endpoint (/api/scheduler/compare)", test_scheduler_compare)
+
     finally:
         # Test 13: Clean shutdown on SIGINT / SIGTERM
         server.stop(signal.SIGINT)

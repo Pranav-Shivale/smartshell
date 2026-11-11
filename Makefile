@@ -88,6 +88,9 @@ $(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
 $(BUILDDIR)/$(TESTDIR)/test_server_auth: $(TESTDIR)/test_server_auth.c $(CORE_OBJS) $(BUILDDIR)/server/auth.o | $(BUILDDIR)/$(TESTDIR)
 	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -I$(TESTDIR) -MMD -MP -o $@ $< $(CORE_OBJS) $(BUILDDIR)/server/auth.o $(LDFLAGS)
 
+$(BUILDDIR)/$(TESTDIR)/test_server_json: $(TESTDIR)/test_server_json.c $(CORE_OBJS) $(BUILDDIR)/server/json_api.o $(CJSON_OBJ) | $(BUILDDIR)/$(TESTDIR)
+	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -I$(TESTDIR) -I$(THIRDPARTYDIR)/cjson -MMD -MP -o $@ $< $(CORE_OBJS) $(BUILDDIR)/server/json_api.o $(CJSON_OBJ) $(LDFLAGS)
+
 $(BUILDDIR)/$(TESTDIR)/%: $(TESTDIR)/%.c $(CORE_OBJS) | $(BUILDDIR)/$(TESTDIR)
 	$(CC) $(CFLAGS) -I$(TESTDIR) -MMD -MP -o $@ $< $(CORE_OBJS) $(LDFLAGS)
 

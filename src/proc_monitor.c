@@ -832,30 +832,7 @@ int builtin_process_tree(const command_t *cmd)
 /* Live Process Monitor & Sorting Implementation                             */
 /* ========================================================================= */
 
-typedef struct {
-    pid_t         pid;
-    char          name[PROC_NAME_MAX];
-    char          state_char;
-    const char   *state_str;
-    pid_t         ppid;
-    pid_t         pgid;
-    long          num_threads;
-    unsigned long vsize_bytes;
-    unsigned long rss_bytes;
-    unsigned long utime_ticks;
-    unsigned long stime_ticks;
-    double        cpu_percent;
-} proc_snap_entry_t;
-
-typedef struct {
-    proc_snap_entry_t *entries;
-    size_t             count;
-    size_t             capacity;
-    struct timespec    timestamp;
-    sys_cpu_t          sys_cpu;
-} proc_snapshot_t;
-
-static proc_snapshot_t *proc_snapshot_create(void)
+proc_snapshot_t *proc_snapshot_create(void)
 {
     proc_snapshot_t *snap = xmalloc(sizeof(proc_snapshot_t));
     snap->count = 0;
@@ -867,14 +844,14 @@ static proc_snapshot_t *proc_snapshot_create(void)
     return snap;
 }
 
-static void proc_snapshot_free(proc_snapshot_t *snap)
+void proc_snapshot_free(proc_snapshot_t *snap)
 {
     if (snap == NULL) return;
     free(snap->entries);
     free(snap);
 }
 
-static void proc_snapshot_populate(proc_snapshot_t *snap)
+void proc_snapshot_populate(proc_snapshot_t *snap)
 {
     DIR *dir = opendir("/proc");
     if (dir == NULL) return;
@@ -935,7 +912,7 @@ static void proc_snapshot_populate(proc_snapshot_t *snap)
     closedir(dir);
 }
 
-static void proc_snapshot_calc_deltas(const proc_snapshot_t *prev, proc_snapshot_t *curr)
+void proc_snapshot_calc_deltas(const proc_snapshot_t *prev, proc_snapshot_t *curr)
 {
     if (curr == NULL) return;
 
@@ -993,6 +970,31 @@ static int compare_entries_mem(const void *a, const void *b)
     if (ea->pid < eb->pid) return -1;
     if (ea->pid > eb->pid) return 1;
     return 0;
+}
+
+proc_snapshot_t *proc_collect_snapshot(proc_sort_mode_t sort_mode)
+{
+    proc_snapshot_t *s1 = proc_snapshot_create();
+    proc_snapshot_populate(s1);
+
+    struct timespec req;
+    req.tv_sec = 0;
+    req.tv_nsec = 100 * 1000000L; /* 100ms delta sample */
+    nanosleep(&req, NULL);
+
+    proc_snapshot_t *s2 = proc_snapshot_create();
+    proc_snapshot_populate(s2);
+
+    proc_snapshot_calc_deltas(s1, s2);
+
+    if (sort_mode == PROC_SORT_CPU) {
+        qsort(s2->entries, s2->count, sizeof(proc_snap_entry_t), compare_entries_cpu);
+    } else {
+        qsort(s2->entries, s2->count, sizeof(proc_snap_entry_t), compare_entries_mem);
+    }
+
+    proc_snapshot_free(s1);
+    return s2;
 }
 
 static void proc_monitor_print_table(const proc_snapshot_t *snap, proc_sort_mode_t sort_mode, size_t max_rows)
@@ -1312,49 +1314,84 @@ int builtin_monitor(const command_t *cmd)
 /* System Information Implementation                                         */
 /* ========================================================================= */
 
+bool proc_get_sysinfo(proc_sysinfo_t *info)
+{
+    if (info == NULL) return false;
+    memset(info, 0, sizeof(*info));
+
+    struct utsname u;
+    if (uname(&u) == 0) {
+        strncpy(info->os_name, u.sysname, sizeof(info->os_name) - 1);
+        strncpy(info->kernel_release, u.release, sizeof(info->kernel_release) - 1);
+        strncpy(info->kernel_version, u.version, sizeof(info->kernel_version) - 1);
+        strncpy(info->machine_arch, u.machine, sizeof(info->machine_arch) - 1);
+    } else {
+        strncpy(info->os_name, "Unknown", sizeof(info->os_name) - 1);
+    }
+
+    info->cpus_online = sysconf(_SC_NPROCESSORS_ONLN);
+    info->cpus_configured = sysconf(_SC_NPROCESSORS_CONF);
+
+    info->has_mem = proc_read_sys_mem(&info->mem);
+
+    info->shell_pid = getpid();
+    info->shell_ppid = getppid();
+    info->shell_pgid = getpgrp();
+    info->shell_sid = getsid(0);
+
+    bool proc_dir = (access("/proc", R_OK | X_OK) == 0);
+    bool proc_stat = (access("/proc/stat", R_OK) == 0);
+    bool proc_meminfo = (access("/proc/meminfo", R_OK) == 0);
+    info->proc_accessible = (proc_dir && proc_stat && proc_meminfo);
+
+    return true;
+}
+
 int proc_display_sysinfo(void)
 {
     printf("SmartShell System Information\n");
     printf("=============================\n");
 
+    proc_sysinfo_t info;
+    if (!proc_get_sysinfo(&info)) {
+        printf("System information unavailable.\n");
+        return 1;
+    }
+
     /* 1. Operating system and kernel release via uname */
-    struct utsname u;
-    if (uname(&u) == 0) {
-        printf("Operating System:     %s %s\n", u.sysname, u.release);
-        printf("Kernel Version:       %s\n", u.version);
-        printf("Machine Architecture: %s\n", u.machine);
+    if (strcmp(info.os_name, "Unknown") != 0) {
+        printf("Operating System:     %s %s\n", info.os_name, info.kernel_release);
+        printf("Kernel Version:       %s\n", info.kernel_version);
+        printf("Machine Architecture: %s\n", info.machine_arch);
     } else {
         printf("Operating System:     Unknown (%s)\n", strerror(errno));
     }
 
     /* 2. CPU core count */
-    long cpus_onln = sysconf(_SC_NPROCESSORS_ONLN);
-    long cpus_conf = sysconf(_SC_NPROCESSORS_CONF);
-    if (cpus_onln > 0) {
-        if (cpus_conf > 0 && cpus_conf != cpus_onln) {
-            printf("CPU Cores:            %ld online (%ld configured)\n", cpus_onln, cpus_conf);
+    if (info.cpus_online > 0) {
+        if (info.cpus_configured > 0 && info.cpus_configured != info.cpus_online) {
+            printf("CPU Cores:            %ld online (%ld configured)\n", info.cpus_online, info.cpus_configured);
         } else {
-            printf("CPU Cores:            %ld online\n", cpus_onln);
+            printf("CPU Cores:            %ld online\n", info.cpus_online);
         }
     } else {
         printf("CPU Cores:            Unknown\n");
     }
 
     /* 3. Memory information from /proc/meminfo */
-    sys_mem_t mem;
-    if (proc_read_sys_mem(&mem) && mem.mem_total_kb > 0) {
+    if (info.has_mem && info.mem.mem_total_kb > 0) {
         char total_buf[32], avail_buf[32], free_buf[32];
-        proc_format_kb(mem.mem_total_kb, total_buf, sizeof(total_buf));
-        proc_format_kb(mem.mem_available_kb, avail_buf, sizeof(avail_buf));
-        proc_format_kb(mem.mem_free_kb, free_buf, sizeof(free_buf));
+        proc_format_kb(info.mem.mem_total_kb, total_buf, sizeof(total_buf));
+        proc_format_kb(info.mem.mem_available_kb, avail_buf, sizeof(avail_buf));
+        proc_format_kb(info.mem.mem_free_kb, free_buf, sizeof(free_buf));
 
-        printf("Total Memory:         %s (%llu kB)\n", total_buf, mem.mem_total_kb);
-        printf("Available Memory:     %s (%llu kB)\n", avail_buf, mem.mem_available_kb);
-        printf("Free Memory:          %s (%llu kB)\n", free_buf, mem.mem_free_kb);
-        if (mem.swap_total_kb > 0) {
+        printf("Total Memory:         %s (%llu kB)\n", total_buf, info.mem.mem_total_kb);
+        printf("Available Memory:     %s (%llu kB)\n", avail_buf, info.mem.mem_available_kb);
+        printf("Free Memory:          %s (%llu kB)\n", free_buf, info.mem.mem_free_kb);
+        if (info.mem.swap_total_kb > 0) {
             char swap_total_buf[32], swap_free_buf[32];
-            proc_format_kb(mem.swap_total_kb, swap_total_buf, sizeof(swap_total_buf));
-            proc_format_kb(mem.swap_free_kb, swap_free_buf, sizeof(swap_free_buf));
+            proc_format_kb(info.mem.swap_total_kb, swap_total_buf, sizeof(swap_total_buf));
+            proc_format_kb(info.mem.swap_free_kb, swap_free_buf, sizeof(swap_free_buf));
             printf("Swap Memory:          %s total / %s free\n", swap_total_buf, swap_free_buf);
         }
     } else {
@@ -1362,15 +1399,10 @@ int proc_display_sysinfo(void)
     }
 
     /* 4. SmartShell PID, PPID, PGID, SID */
-    pid_t pid = getpid();
-    pid_t ppid = getppid();
-    pid_t pgid = getpgrp();
-    pid_t sid = getsid(0);
-
-    printf("SmartShell PID:       %d\n", (int)pid);
-    printf("Parent PID (PPID):    %d\n", (int)ppid);
-    printf("Process Group (PGID): %d\n", (int)pgid);
-    printf("Session ID (SID):     %d\n", (int)sid);
+    printf("SmartShell PID:       %d\n", (int)info.shell_pid);
+    printf("Parent PID (PPID):    %d\n", (int)info.shell_ppid);
+    printf("Process Group (PGID): %d\n", (int)info.shell_pgid);
+    printf("Session ID (SID):     %d\n", (int)info.shell_sid);
 
     /* 5. Terminal status */
     if (isatty(STDIN_FILENO)) {
