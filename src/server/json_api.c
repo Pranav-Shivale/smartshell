@@ -69,7 +69,11 @@ char *json_serialize_metrics(double cpu_util, const sys_mem_t *mem)
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) return NULL;
 
-    cJSON_AddNumberToObject(root, "cpu_utilization", cpu_util);
+    if (cpu_util >= 0.0) {
+        cJSON_AddNumberToObject(root, "cpu_utilization", cpu_util);
+    } else {
+        cJSON_AddNullToObject(root, "cpu_utilization");
+    }
 
     if (mem != NULL) {
         cJSON *m = cJSON_CreateObject();

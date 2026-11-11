@@ -487,7 +487,14 @@ static int handle_processes(struct mg_connection *conn, void *cbdata)
         }
 
         /* Sample CPU usage over 50ms for live CPU percent */
-        proc_sample_pid_info((pid_t)pid, 50, &info);
+        if (!proc_sample_pid_info((pid_t)pid, 50, &info)) {
+            /* Check if the process disappeared during the sampling window */
+            proc_info_t check;
+            if (!proc_read_pid_info((pid_t)pid, &check)) {
+                send_error(conn, 404, "process not found");
+                return 200;
+            }
+        }
 
         char *json = json_serialize_pid_info(&info);
         if (json == NULL) {

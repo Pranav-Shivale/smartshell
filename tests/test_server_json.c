@@ -98,11 +98,13 @@ static void test_metrics_serialization(void)
     cJSON_Delete(root);
     free(json_str);
 
-    /* Test with NULL mem */
-    char *json_no_mem = json_serialize_metrics(10.0, NULL);
+    /* Test with NULL mem and negative CPU (unavailable measurement) */
+    char *json_no_mem = json_serialize_metrics(-1.0, NULL);
     ASSERT_TRUE(json_no_mem != NULL);
     cJSON *r2 = cJSON_Parse(json_no_mem);
     ASSERT_TRUE(r2 != NULL);
+    cJSON *cpu2 = cJSON_GetObjectItem(r2, "cpu_utilization");
+    ASSERT_TRUE(cpu2 != NULL && cJSON_IsNull(cpu2));
     ASSERT_TRUE(cJSON_GetObjectItem(r2, "memory") == NULL);
     cJSON_Delete(r2);
     free(json_no_mem);

@@ -371,7 +371,7 @@ double proc_sample_sys_cpu(unsigned int interval_ms)
 {
     sys_cpu_t s1, s2;
     if (!proc_read_sys_cpu(&s1)) {
-        return 0.0;
+        return -1.0;
     }
 
     struct timespec req;
@@ -380,7 +380,7 @@ double proc_sample_sys_cpu(unsigned int interval_ms)
     nanosleep(&req, NULL);
 
     if (!proc_read_sys_cpu(&s2)) {
-        return 0.0;
+        return -1.0;
     }
 
     return proc_calc_cpu_utilization(&s1, &s2);
@@ -448,7 +448,11 @@ int proc_monitor_display_summary(void)
     double cpu_util = proc_sample_sys_cpu(PROC_DEFAULT_SAMPLE_MS);
 
     printf("--- System Overview ---\n");
-    printf("CPU Utilization:  %.1f%%\n", cpu_util);
+    if (cpu_util >= 0.0) {
+        printf("CPU Utilization:  %.1f%%\n", cpu_util);
+    } else {
+        printf("CPU Utilization:  N/A\n");
+    }
 
     if (has_mem && mem.mem_total_kb > 0) {
         char total_buf[32], avail_buf[32], used_buf[32], free_buf[32];

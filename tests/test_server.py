@@ -303,13 +303,25 @@ def run_tests():
             assert isinstance(data.get("processes"), list)
             assert len(data["processes"]) > 0
 
+            # Sort cpu explicit
+            status, _, body = raw_http_request(port, "GET", "/api/processes?sort=cpu", headers=auth_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert data.get("sort") == "cpu"
+
             # Sort memory
             status, _, body = raw_http_request(port, "GET", "/api/processes?sort=memory", headers=auth_headers)
             assert status == 200, f"Expected 200, got {status}: {body}"
             data = json.loads(body)
             assert data.get("sort") == "memory"
 
-            # Limit
+            # Limit = 1
+            status, _, body = raw_http_request(port, "GET", "/api/processes?limit=1", headers=auth_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert len(data.get("processes", [])) == 1
+
+            # Limit = 3
             status, _, body = raw_http_request(port, "GET", "/api/processes?limit=3", headers=auth_headers)
             assert status == 200, f"Expected 200, got {status}: {body}"
             data = json.loads(body)
@@ -319,7 +331,11 @@ def run_tests():
             status, _, _ = raw_http_request(port, "GET", "/api/processes?sort=invalid", headers=auth_headers)
             assert status == 400, f"Expected 400 for invalid sort, got {status}"
 
-            # Invalid limit
+            # Invalid limit <= 0
+            status, _, _ = raw_http_request(port, "GET", "/api/processes?limit=0", headers=auth_headers)
+            assert status == 400, f"Expected 400 for limit 0, got {status}"
+
+            # Invalid limit non-numeric
             status, _, _ = raw_http_request(port, "GET", "/api/processes?limit=abc", headers=auth_headers)
             assert status == 400, f"Expected 400 for invalid limit, got {status}"
 
@@ -340,6 +356,13 @@ def run_tests():
             assert "state" in data
             assert "rss_bytes" in data
             assert "vsize_bytes" in data
+
+            # Query short-lived process that terminates
+            sub = subprocess.Popen(["sleep", "0.01"])
+            sub_pid = sub.pid
+            sub.wait()
+            status, _, _ = raw_http_request(port, "GET", f"/api/processes/{sub_pid}", headers=auth_headers)
+            assert status == 404, f"Expected 404 for terminated process, got {status}"
 
             # Non-existent PID
             status, _, _ = raw_http_request(port, "GET", "/api/processes/9999999", headers=auth_headers)
@@ -429,6 +452,44 @@ def run_tests():
             status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=bad_alg)
             assert status == 400, f"Expected 400, got {status}"
 
+            # Missing algorithm
+            missing_alg = json.dumps({"processes": [{"pid": 1, "arrival_time": 0, "burst_time": 2}]})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=missing_alg)
+            assert status == 400, f"Expected 400 for missing algorithm, got {status}"
+
+            # Missing processes array
+            missing_procs = json.dumps({"algorithm": "fcfs"})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=missing_procs)
+            assert status == 400, f"Expected 400 for missing processes, got {status}"
+
+            # Missing burst_time in process
+            missing_bt = json.dumps({"algorithm": "fcfs", "processes": [{"pid": 1, "arrival_time": 0}]})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=missing_bt)
+            assert status == 400, f"Expected 400 for missing burst_time, got {status}"
+
+            # Zero burst time
+            zero_bt = json.dumps({"algorithm": "fcfs", "processes": [{"pid": 1, "arrival_time": 0, "burst_time": 0}]})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=zero_bt)
+            assert status == 400, f"Expected 400 for zero burst, got {status}"
+
+            # Negative arrival time
+            neg_arr = json.dumps({"algorithm": "fcfs", "processes": [{"pid": 1, "arrival_time": -5, "burst_time": 3}]})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=neg_arr)
+            assert status == 400, f"Expected 400 for negative arrival, got {status}"
+
+            # Duplicate PID
+            dup_pid = json.dumps({"algorithm": "fcfs", "processes": [
+                {"pid": 1, "arrival_time": 0, "burst_time": 2},
+                {"pid": 1, "arrival_time": 1, "burst_time": 3}
+            ]})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=dup_pid)
+            assert status == 400, f"Expected 400 for duplicate PID, got {status}"
+
+            # Invalid quantum (<= 0)
+            bad_q = json.dumps({"algorithm": "rr", "quantum": -1, "processes": [{"pid": 1, "arrival_time": 0, "burst_time": 2}]})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=bad_q)
+            assert status == 400, f"Expected 400 for negative quantum, got {status}"
+
             # Invalid workload (negative burst)
             bad_workload = json.dumps({"algorithm": "fcfs", "processes": [{"pid": 1, "arrival_time": 0, "burst_time": -3}]})
             status, _, _ = raw_http_request(port, "POST", "/api/scheduler/simulate", headers=sim_headers, body=bad_workload)
@@ -479,10 +540,35 @@ def run_tests():
                 assert "summary" in results[alg]
             assert "comparison_table" in data
 
+            # Non-default RR quantum check (quantum=6)
+            q6_payload = json.dumps({
+                "quantum": 6,
+                "processes": [
+                    {"pid": 1, "arrival_time": 0, "burst_time": 8, "priority": 1},
+                    {"pid": 2, "arrival_time": 2, "burst_time": 4, "priority": 2}
+                ]
+            })
+            status, _, body = raw_http_request(port, "POST", "/api/scheduler/compare", headers=cmp_headers, body=q6_payload)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            data = json.loads(body)
+            assert data.get("quantum") == 6
+            assert "results" in data
+            assert data["results"]["rr"]["summary"]["cpu_utilization"] > 0
+
             # Invalid payload (empty processes)
             empty_payload = json.dumps({"processes": []})
             status, _, _ = raw_http_request(port, "POST", "/api/scheduler/compare", headers=cmp_headers, body=empty_payload)
             assert status == 400, f"Expected 400, got {status}"
+
+            # Missing processes field
+            missing_procs = json.dumps({"quantum": 4})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/compare", headers=cmp_headers, body=missing_procs)
+            assert status == 400, f"Expected 400 for missing processes, got {status}"
+
+            # Invalid non-positive quantum
+            bad_q = json.dumps({"quantum": 0, "processes": [{"pid": 1, "arrival_time": 0, "burst_time": 4}]})
+            status, _, _ = raw_http_request(port, "POST", "/api/scheduler/compare", headers=cmp_headers, body=bad_q)
+            assert status == 400, f"Expected 400 for quantum 0, got {status}"
 
             # Oversized payload (>64KB)
             huge_payload = json.dumps({"padding": "x" * 70000})
