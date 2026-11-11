@@ -32,12 +32,17 @@ bool is_builtin(const char *name)
             strcmp(name, "bg") == 0 ||
             strcmp(name, "kill") == 0 ||
             strcmp(name, "monitor") == 0 ||
+            strcmp(name, "process-tree") == 0 ||
+            strcmp(name, "sysinfo") == 0 ||
             strcmp(name, "schedule") == 0);
 }
 
 static int builtin_cd(const command_t *cmd)
 {
     const char *target = NULL;
+    bool print_target = false;
+    char current_cwd[4096];
+    bool has_current_cwd = (getcwd(current_cwd, sizeof(current_cwd)) != NULL);
 
     if (cmd->argc == 1 || strcmp(cmd->argv[1], "~") == 0) {
         target = getenv("HOME");
@@ -46,7 +51,16 @@ static int builtin_cd(const command_t *cmd)
             return 1;
         }
     } else if (cmd->argc == 2) {
-        target = cmd->argv[1];
+        if (strcmp(cmd->argv[1], "-") == 0) {
+            target = getenv("OLDPWD");
+            if (target == NULL || *target == '\0') {
+                fprintf(stderr, "smartshell: cd: OLDPWD not set\n");
+                return 1;
+            }
+            print_target = true;
+        } else {
+            target = cmd->argv[1];
+        }
     } else {
         fprintf(stderr, "smartshell: cd: too many arguments\n");
         return 1;
@@ -55,6 +69,17 @@ static int builtin_cd(const command_t *cmd)
     if (chdir(target) != 0) {
         fprintf(stderr, "smartshell: cd: %s: %s\n", target, strerror(errno));
         return 1;
+    }
+
+    char new_cwd[4096];
+    if (getcwd(new_cwd, sizeof(new_cwd)) != NULL) {
+        if (has_current_cwd) {
+            setenv("OLDPWD", current_cwd, 1);
+        }
+        setenv("PWD", new_cwd, 1);
+        if (print_target) {
+            printf("%s\n", new_cwd);
+        }
     }
 
     return 0;
@@ -75,14 +100,17 @@ static int builtin_pwd(void)
 static int builtin_help(void)
 {
     printf("SmartShell — Built-in Commands:\n");
-    printf("  cd [dir]       Change the working directory (defaults to HOME)\n");
+    printf("  cd [dir|-]     Change working directory (defaults to HOME, - for OLDPWD)\n");
     printf("  pwd            Print the current working directory\n");
     printf("  jobs           List active jobs\n");
     printf("  fg [%%jid]      Bring a job to the foreground\n");
     printf("  bg [%%jid]      Resume a stopped job in the background\n");
     printf("  kill [-sig] <pid|%%jid> Send a signal to a process or job\n");
     printf("  monitor [pid]  Monitor system overview, shell jobs, or process details via /proc\n");
-    printf("  schedule <alg> Simulate CPU scheduling algorithms (fcfs, sjf, rr, priority, mlfq)\n");
+    printf("                 Options: --watch (-w), --sort cpu|memory (-s cpu|memory)\n");
+    printf("  process-tree [pid] Display process hierarchy tree from /proc\n");
+    printf("  sysinfo        Display system hardware, OS, memory and shell information\n");
+    printf("  schedule <alg> Simulate CPU scheduling algorithms (fcfs, sjf, rr, priority, mlfq, custom, compare)\n");
     printf("  help           Display this help message\n");
     printf("  exit [code]    Exit the shell with optional status (0-255)\n");
     printf("  quit [code]    Alias for exit\n\n");
@@ -404,16 +432,291 @@ static void init_demo_workload(sched_process_t *workload)
 
 static int builtin_schedule_help(void)
 {
-    printf("Usage: schedule <algorithm> [args]\n\n");
-    printf("Simulate educational CPU scheduling algorithms on a deterministic virtual workload.\n");
+    printf("Usage: schedule <algorithm|command> [args]\n\n");
+    printf("Simulate educational CPU scheduling algorithms on virtual workloads.\n");
     printf("NOTE: This is a user-space simulation; it does not alter Linux's real CPU scheduler.\n\n");
-    printf("Available algorithms:\n");
-    printf("  schedule fcfs          First-Come, First-Served (non-preemptive)\n");
-    printf("  schedule sjf           Shortest Job First (non-preemptive)\n");
-    printf("  schedule rr [quantum]  Round Robin (preemptive, default quantum: %d)\n", SCHED_DEFAULT_RR_QUANTUM);
-    printf("  schedule priority      Priority scheduling (non-preemptive, lower number = higher priority)\n");
-    printf("  schedule mlfq          Multilevel Feedback Queue (3 queues: RR4, RR8, FCFS; boost every 200 ticks)\n");
-    printf("  schedule help          Display this help message\n");
+    printf("Available algorithms and commands:\n");
+    printf("  schedule fcfs              First-Come, First-Served (non-preemptive)\n");
+    printf("  schedule sjf               Shortest Job First (non-preemptive)\n");
+    printf("  schedule rr [quantum]      Round Robin (preemptive, default quantum: %d)\n", SCHED_DEFAULT_RR_QUANTUM);
+    printf("  schedule priority          Priority scheduling (non-preemptive, lower number = higher priority)\n");
+    printf("  schedule mlfq              Multilevel Feedback Queue (3 queues: RR4, RR8, FCFS; boost every 200 ticks)\n");
+    printf("  schedule custom            Interactive custom process workload simulation\n");
+    printf("  schedule compare [demo [q]] Compare all five algorithms on identical workload\n");
+    printf("  schedule help              Display this help message\n");
+    return 0;
+}
+
+static void print_schedule_results(const char *algo_name, bool is_rr, int quantum,
+                                   const sched_process_t *workload, int count,
+                                   const sched_result_t *res);
+
+static bool prompt_int(const char *prompt, long min_val, long max_val,
+                       long default_val, bool allow_default, int *result,
+                       const char *val_name)
+{
+    while (1) {
+        printf("%s", prompt);
+        fflush(stdout);
+
+        char buf[256];
+        if (fgets(buf, sizeof(buf), stdin) == NULL) {
+            printf("\n");
+            return false;
+        }
+
+        /* Trim leading whitespace */
+        char *p = buf;
+        while (*p != '\0' && isspace((unsigned char)*p)) {
+            p++;
+        }
+
+        /* Trim trailing whitespace */
+        char *end = p + strlen(p);
+        while (end > p && isspace((unsigned char)*(end - 1))) {
+            end--;
+            *end = '\0';
+        }
+
+        if (*p == '\0') {
+            if (allow_default) {
+                *result = (int)default_val;
+                return true;
+            }
+            fprintf(stderr, "smartshell: schedule: input cannot be empty\n");
+            continue;
+        }
+
+        char *endptr = NULL;
+        errno = 0;
+        long val = strtol(p, &endptr, 10);
+        if (errno == ERANGE) {
+            fprintf(stderr, "smartshell: schedule: integer overflow\n");
+            continue;
+        }
+        if (endptr == p || *endptr != '\0') {
+            fprintf(stderr, "smartshell: schedule: invalid integer '%s'\n", p);
+            continue;
+        }
+        if (val < min_val || val > max_val) {
+            if (val_name != NULL) {
+                fprintf(stderr, "smartshell: schedule: %s must be between %ld and %ld\n",
+                        val_name, min_val, max_val);
+            } else {
+                fprintf(stderr, "smartshell: schedule: value %ld out of allowed range [%ld, %ld]\n",
+                        val, min_val, max_val);
+            }
+            continue;
+        }
+
+        *result = (int)val;
+        return true;
+    }
+}
+
+static bool prompt_custom_workload(sched_process_t *workload, int *out_count)
+{
+    int count = 0;
+    if (!prompt_int("Number of processes: ", 1, SCHED_MAX_CUSTOM_PROCESSES, 0, false, &count, "process count")) {
+        return false;
+    }
+
+    for (int i = 0; i < count; i++) {
+        int arrival = 0, burst = 0, priority = 0;
+        printf("\nP%d:\n", i + 1);
+
+        if (!prompt_int("Arrival time: ", 0, 100000, 0, false, &arrival, "arrival time")) {
+            return false;
+        }
+        if (!prompt_int("Burst time: ", 1, 100000, 0, false, &burst, "burst time")) {
+            return false;
+        }
+        if (!prompt_int("Priority: ", 0, 100000, 0, false, &priority, "priority")) {
+            return false;
+        }
+
+        sched_process_init(&workload[i], i + 1, arrival, burst, priority);
+    }
+
+    *out_count = count;
+    return true;
+}
+
+static int builtin_schedule_custom(void)
+{
+    sched_process_t workload[SCHED_MAX_CUSTOM_PROCESSES];
+    int count = 0;
+
+    if (!prompt_custom_workload(workload, &count)) {
+        return 1;
+    }
+
+    printf("\nSelect scheduling algorithm:\n");
+    printf("  1. FCFS\n");
+    printf("  2. SJF\n");
+    printf("  3. Round Robin\n");
+    printf("  4. Priority\n");
+    printf("  5. MLFQ\n");
+    printf("  6. Compare all\n");
+
+    int choice = 0;
+    if (!prompt_int("Select option (1-6): ", 1, 6, 0, false, &choice, "algorithm choice")) {
+        return 1;
+    }
+
+    if (choice == 6) {
+        int quantum = SCHED_DEFAULT_RR_QUANTUM;
+        if (!prompt_int("Enter Round Robin quantum (default 4): ", 1, 100, SCHED_DEFAULT_RR_QUANTUM, true, &quantum, "quantum")) {
+            return 1;
+        }
+
+        sched_compare_result_t cmp;
+        if (sched_compare_all(workload, count, quantum, &cmp) != 0) {
+            fprintf(stderr, "smartshell: schedule: comparison simulation failed\n");
+            sched_compare_result_free(&cmp);
+            return 1;
+        }
+
+        char *tbl = sched_render_comparison(&cmp);
+        if (tbl != NULL) {
+            printf("\n%s\n", tbl);
+            free(tbl);
+        }
+        sched_compare_result_free(&cmp);
+        return 0;
+    }
+
+    const char *alg_name = NULL;
+    bool is_rr = false;
+    int quantum = SCHED_DEFAULT_RR_QUANTUM;
+    sched_result_t res;
+    sched_result_init(&res);
+    int rc = -1;
+
+    switch (choice) {
+        case 1:
+            alg_name = "First-Come, First-Served (FCFS)";
+            rc = sched_schedule_fcfs(workload, count, &res);
+            break;
+        case 2:
+            alg_name = "Shortest Job First (SJF)";
+            rc = sched_schedule_sjf(workload, count, &res);
+            break;
+        case 3:
+            is_rr = true;
+            if (!prompt_int("Enter Round Robin quantum (default 4): ", 1, 100, SCHED_DEFAULT_RR_QUANTUM, true, &quantum, "quantum")) {
+                sched_result_free(&res);
+                return 1;
+            }
+            alg_name = "Round Robin (RR)";
+            rc = sched_schedule_rr(workload, count, quantum, &res);
+            break;
+        case 4:
+            alg_name = "Non-Preemptive Priority";
+            rc = sched_schedule_priority(workload, count, &res);
+            break;
+        case 5:
+            alg_name = "Multilevel Feedback Queue (MLFQ)";
+            rc = sched_schedule_mlfq(workload, count, &res);
+            break;
+        default:
+            sched_result_free(&res);
+            return 1;
+    }
+
+    if (rc != 0) {
+        fprintf(stderr, "smartshell: schedule: simulation failed\n");
+        sched_result_free(&res);
+        return 1;
+    }
+
+    printf("\n");
+    print_schedule_results(alg_name, is_rr, quantum, workload, count, &res);
+    sched_result_free(&res);
+    return 0;
+}
+
+static int builtin_schedule_compare(const command_t *cmd)
+{
+    sched_process_t workload[SCHED_MAX_CUSTOM_PROCESSES];
+    int count = 0;
+    int quantum = SCHED_DEFAULT_RR_QUANTUM;
+
+    if (cmd->argc == 2) {
+        /* Interactive selection: Demo workload vs Custom workload */
+        printf("Select comparison workload:\n");
+        printf("  1. Built-in demo workload (5 processes)\n");
+        printf("  2. Custom workload\n");
+
+        int mode = 0;
+        if (!prompt_int("Select option (1-2): ", 1, 2, 0, false, &mode, "workload choice")) {
+            return 1;
+        }
+
+        if (mode == 1) {
+            init_demo_workload(workload);
+            count = SCHED_DEMO_WORKLOAD_COUNT;
+            if (!prompt_int("Enter Round Robin quantum (default 4): ", 1, 100, SCHED_DEFAULT_RR_QUANTUM, true, &quantum, "quantum")) {
+                return 1;
+            }
+        } else {
+            if (!prompt_custom_workload(workload, &count)) {
+                return 1;
+            }
+            if (!prompt_int("Enter Round Robin quantum (default 4): ", 1, 100, SCHED_DEFAULT_RR_QUANTUM, true, &quantum, "quantum")) {
+                return 1;
+            }
+        }
+    } else if (cmd->argc >= 3) {
+        /* Command-line mode: schedule compare demo [quantum] OR schedule compare <quantum> */
+        if (strcmp(cmd->argv[2], "demo") == 0) {
+            init_demo_workload(workload);
+            count = SCHED_DEMO_WORKLOAD_COUNT;
+            if (cmd->argc == 4) {
+                char *endptr = NULL;
+                errno = 0;
+                long val = strtol(cmd->argv[3], &endptr, 10);
+                if (errno != 0 || endptr == cmd->argv[3] || *endptr != '\0' || val <= 0 || val > 100) {
+                    fprintf(stderr, "smartshell: schedule: invalid quantum '%s': must be a positive integer between 1 and 100\n",
+                            cmd->argv[3]);
+                    return 1;
+                }
+                quantum = (int)val;
+            } else if (cmd->argc > 4) {
+                fprintf(stderr, "smartshell: schedule: too many arguments\n");
+                return 1;
+            }
+        } else {
+            char *endptr = NULL;
+            errno = 0;
+            long val = strtol(cmd->argv[2], &endptr, 10);
+            if (errno != 0 || endptr == cmd->argv[2] || *endptr != '\0' || val <= 0 || val > 100) {
+                fprintf(stderr, "smartshell: schedule: unknown compare option '%s'\n", cmd->argv[2]);
+                return 1;
+            }
+            if (cmd->argc > 3) {
+                fprintf(stderr, "smartshell: schedule: too many arguments\n");
+                return 1;
+            }
+            init_demo_workload(workload);
+            count = SCHED_DEMO_WORKLOAD_COUNT;
+            quantum = (int)val;
+        }
+    }
+
+    sched_compare_result_t cmp;
+    if (sched_compare_all(workload, count, quantum, &cmp) != 0) {
+        fprintf(stderr, "smartshell: schedule: comparison simulation failed\n");
+        sched_compare_result_free(&cmp);
+        return 1;
+    }
+
+    char *tbl = sched_render_comparison(&cmp);
+    if (tbl != NULL) {
+        printf("\n%s\n", tbl);
+        free(tbl);
+    }
+    sched_compare_result_free(&cmp);
     return 0;
 }
 
@@ -486,7 +789,15 @@ static int builtin_schedule(const command_t *cmd)
     int quantum = SCHED_DEFAULT_RR_QUANTUM;
     bool is_rr = false;
 
-    if (strcmp(alg, "fcfs") == 0) {
+    if (strcmp(alg, "custom") == 0) {
+        if (cmd->argc > 2) {
+            fprintf(stderr, "smartshell: schedule: too many arguments\n");
+            return 1;
+        }
+        return builtin_schedule_custom();
+    } else if (strcmp(alg, "compare") == 0) {
+        return builtin_schedule_compare(cmd);
+    } else if (strcmp(alg, "fcfs") == 0) {
         if (cmd->argc > 2) {
             fprintf(stderr, "smartshell: schedule: too many arguments\n");
             return 1;
@@ -606,6 +917,12 @@ int execute_builtin(const command_t *cmd, bool *should_exit, int *exit_code)
     }
     if (strcmp(name, "monitor") == 0) {
         return builtin_monitor(cmd);
+    }
+    if (strcmp(name, "process-tree") == 0) {
+        return builtin_process_tree(cmd);
+    }
+    if (strcmp(name, "sysinfo") == 0) {
+        return builtin_sysinfo(cmd);
     }
     if (strcmp(name, "schedule") == 0) {
         return builtin_schedule(cmd);

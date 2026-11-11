@@ -1,4 +1,4 @@
-# SmartShell CPU Scheduling Lab (Phase 8A, 8B & 8C)
+# SmartShell CPU Scheduling Lab (Phase 8 & Phase 10 Upgrade)
 
 The SmartShell CPU Scheduling Lab is an educational simulation environment designed to demonstrate classical operating system CPU scheduling concepts in user space.
 
@@ -188,20 +188,24 @@ SmartShell integrates the educational CPU scheduling laboratory into the interac
 
 ```text
 schedule <algorithm> [args]
+schedule custom
+schedule compare [demo [quantum]]
 schedule help
 ```
 
 Running `schedule` with no arguments or `schedule help` prints the usage summary and lists all supported algorithms.
 
 #### Supported Subcommands:
-- `schedule fcfs`: Non-preemptive First-Come, First-Served simulation.
-- `schedule sjf`: Non-preemptive Shortest Job First simulation (tie-broken by arrival time, then PID).
-- `schedule rr [quantum]`: Preemptive Round Robin simulation.
+- `schedule fcfs`: Non-preemptive First-Come, First-Served simulation on demo workload.
+- `schedule sjf`: Non-preemptive Shortest Job First simulation on demo workload.
+- `schedule rr [quantum]`: Preemptive Round Robin simulation on demo workload.
   - The `[quantum]` parameter is optional and defaults to `4`.
   - Allowed bounds: `1` to `100` simulated ticks.
   - Non-numeric or out-of-range quantum values return an error message without crashing or running the simulation.
-- `schedule priority`: Non-preemptive static priority scheduling (lower numerical value = higher priority, tie-broken by arrival time, then PID).
-- `schedule mlfq`: Multilevel Feedback Queue simulation (3 priority levels: Q0 quantum 4, Q1 quantum 8, Q2 FCFS; global priority boost every 200 ticks).
+- `schedule priority`: Non-preemptive static priority scheduling on demo workload.
+- `schedule mlfq`: Multilevel Feedback Queue simulation on demo workload (3 priority levels: Q0 quantum 4, Q1 quantum 8, Q2 FCFS; global priority boost every 200 ticks).
+- `schedule custom`: Interactively prompts for custom process count, arrival times, burst times, and priorities, then runs the selected algorithm or compares all algorithms.
+- `schedule compare [demo [quantum]]`: Executes all 5 scheduling algorithms on the same workload and presents a unified performance comparison table. Can use the built-in demo workload or prompt for a custom workload.
 - `schedule help`: Displays command usage, algorithm descriptions, and options.
 
 ### 7.2 Built-in Demo Workload
@@ -359,3 +363,120 @@ Summary:
 > - It does **not** spawn real Linux processes (`fork()`, `clone()`, `exec()`), send OS signals (`kill()`, `SIGSTOP`, `SIGCONT`), or manipulate terminal control groups (`tcsetpgrp()`).
 > - It does **not** use real-time sleep calls (`sleep()`, `nanosleep()`, `usleep()`) to advance time; virtual time is represented as deterministic discrete integers and computed mathematically.
 > - Real shell jobs and background pipelines executed by SmartShell continue to be scheduled solely by the Linux operating system kernel.
+
+---
+
+## 8. Custom Scheduling Workloads (`schedule custom`)
+
+In SmartShell 2.0 (Phase 10), users can define arbitrary virtual workloads interactively to experiment with custom process configurations:
+
+```text
+smartshell> schedule custom
+=== SmartShell Custom Workload Builder ===
+Enter number of processes (1-32): 3
+
+--- Process 1 (P1) ---
+  Arrival time (>= 0): 0
+  Burst time (> 0): 5
+  Priority (>= 0, lower=higher priority): 2
+
+--- Process 2 (P2) ---
+  Arrival time (>= 0): 1
+  Burst time (> 0): 3
+  Priority (>= 0, lower=higher priority): 1
+
+--- Process 3 (P3) ---
+  Arrival time (>= 0): 2
+  Burst time (> 0): 4
+  Priority (>= 0, lower=higher priority): 3
+
+Select algorithm to execute:
+  1) First-Come, First-Served (FCFS)
+  2) Shortest Job First (SJF)
+  3) Round Robin (RR)
+  4) Priority (Non-preemptive)
+  5) Multilevel Feedback Queue (MLFQ)
+  6) Compare all algorithms
+Choose [1-6]: 6
+```
+
+### 8.1 Input Validation Rules
+
+All interactive input is processed through strict validation:
+- **Process Count ($N$)**: Bounded by `1` to `SCHED_MAX_CUSTOM_PROCESSES` (`32`). Values outside this range, non-numeric strings, or integer overflows are rejected with informative error messages.
+- **Process Identifier ($PID$)**: Assigned automatically as sequential positive integers ($1, 2, \dots, N$), rendered as `P1, P2, ... PN`.
+- **Arrival Time ($AT$)**: Must be a non-negative integer ($0 \le AT \le 100{,}000$). Negative arrival times are rejected.
+- **Burst Time ($BT$)**: Must be a strictly positive integer ($1 \le BT \le 100{,}000$). Zero and negative burst times are rejected.
+- **Priority ($PR$)**: Must be a non-negative integer ($0 \le PR \le 100{,}000$). Lower values indicate higher priority.
+- **Integer Overflow**: All numerical conversions use `strtol` with `errno == ERANGE` checking and strict end-pointer validation.
+- **EOF Handling**: If standard input encounters EOF (e.g., Ctrl+D or end of redirected input stream), the custom builder immediately cancels execution cleanly without memory leaks or crashes.
+- **Re-prompting**: Invalid inputs trigger a descriptive warning and re-prompt the user without aborting the entire workload definition.
+
+---
+
+## 9. Algorithm Comparison (`schedule compare`)
+
+The `schedule compare` command executes all five scheduling algorithms (FCFS, SJF, Round Robin, Priority, and MLFQ) against an identical workload and generates a unified side-by-side performance comparison table.
+
+### 9.1 Usage
+
+```text
+schedule compare
+schedule compare demo
+schedule compare demo <quantum>
+schedule compare <quantum>
+```
+
+- When run with `demo`, it immediately evaluates the built-in 5-process benchmark workload.
+- When run interactively without arguments, it offers the choice between the demo workload and creating a custom workload, followed by an optional Round Robin quantum configuration (default: 4 ticks, bounds: 1 to 100 ticks).
+- Command-line arguments allow specifying the Round Robin quantum directly (e.g. `schedule compare demo 2`).
+
+### 9.2 Independent Workload Isolation
+
+To ensure strict experimental validity, each algorithm receives an independent, unmutated copy of the initial workload. The comparison engine (`sched_compare_all`) guarantees:
+1. Every algorithm starts from the exact same arrival times, burst requirements, and priorities.
+2. Mutable runtime metrics (such as `remaining_time`, `start_time`, `completion_time`) are computed independently without cross-algorithm side effects.
+
+### 9.3 Comparison Table Output Format
+
+```text
+=======================================================================================
+                         SmartShell Algorithm Comparison Table                         
+=======================================================================================
+Workload: 5 processes | Round Robin Quantum: 4 ticks
+MLFQ Policy: Q0 (RR Q=4), Q1 (RR Q=8), Q2 (FCFS) | Starvation Boost: 200 ticks
+---------------------------------------------------------------------------------------
+Algorithm        Avg Wait  Avg Turnaround  Avg Response   CPU Util  Elapsed  Busy  Idle
+---------------------------------------------------------------------------------------
+FCFS                 6.40           11.80          6.40     90.00%       30    27     3
+SJF                  4.60           10.00          4.60     90.00%       30    27     3
+Round Robin (Q=4)    6.60           12.00          3.80     90.00%       30    27     3
+Priority             5.80           11.20          5.80     90.00%       30    27     3
+MLFQ                 6.20           11.60          3.00     90.00%       30    27     3
+---------------------------------------------------------------------------------------
+Metric Key:
+  Avg Wait:       Mean waiting time in ready queue (lower is better)
+  Avg Turnaround: Mean time from arrival to completion (lower is better)
+  Avg Response:   Mean time from arrival to first execution (lower is better)
+  CPU Util:       Percentage of elapsed time the CPU executed virtual processes
+=======================================================================================
+```
+
+---
+
+## 10. Multi-Row Wrapped Gantt Charts
+
+In earlier versions, execution timelines were rendered on a single horizontal line. For long workloads, small time quantums, or narrow terminals, lines would wrap awkwardly and break the visual alignment between process bars and numerical time markers.
+
+SmartShell 2.0 introduces multi-row wrapped Gantt rendering:
+- **API Function**:
+  ```c
+  char *sched_render_gantt_wrapped(const sched_result_t *result, int max_cols);
+  int sched_render_gantt_wrapped_buf(const sched_result_t *result, char *buf, size_t size, int max_cols);
+  ```
+- **Default Column Limit**: `SCHED_GANTT_DEFAULT_MAX_COLS = 76` characters.
+- **Row Partitioning**: The renderer calculates the exact character width of each slice box and boundary marker. When a slice would exceed `max_cols`, a clean row break is inserted.
+- **Vertical Time Alignment**: Every row begins with its start time marker directly aligned beneath its starting vertical bar `|`, and concludes with its row-ending boundary time marker.
+- **Large Timestamp Support**: Handles multi-digit simulated clock ticks gracefully by expanding label spacing where necessary to maintain strictly aligned vertical columns.
+- **Backward Compatibility**: `sched_render_gantt()` and `sched_render_gantt_buf()` automatically forward to the wrapped implementation with `max_cols = 76`, ensuring existing callers and test cases remain 100% compatible.
+

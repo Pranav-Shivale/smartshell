@@ -17,6 +17,8 @@ static void test_is_builtin(void)
     ASSERT_TRUE(is_builtin("quit"));
     ASSERT_TRUE(is_builtin("help"));
     ASSERT_TRUE(is_builtin("schedule"));
+    ASSERT_TRUE(is_builtin("process-tree"));
+    ASSERT_TRUE(is_builtin("sysinfo"));
 
     ASSERT_FALSE(is_builtin("ls"));
     ASSERT_FALSE(is_builtin("echo"));
@@ -46,18 +48,56 @@ static void test_builtin_pwd_and_cd(void)
     char original_cwd[4096];
     ASSERT_NOT_NULL(getcwd(original_cwd, sizeof(original_cwd)));
 
-    /* cd /tmp */
-    command_t *cmd = parse_command("cd /tmp", NULL);
-    ASSERT_NOT_NULL(cmd);
+    /* Ensure known baseline for OLDPWD */
+    unsetenv("OLDPWD");
 
+    /* cd - with unset OLDPWD should fail with error code 1 */
+    command_t *cmd = parse_command("cd -", NULL);
+    ASSERT_NOT_NULL(cmd);
     bool should_exit = false;
     int exit_code = 0;
     int ret = execute_builtin(cmd, &should_exit, &exit_code);
+    ASSERT_EQ_INT(1, ret);
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* cd /tmp */
+    cmd = parse_command("cd /tmp", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ret = execute_builtin(cmd, &should_exit, &exit_code);
     ASSERT_EQ_INT(0, ret);
     ASSERT_FALSE(should_exit);
     free_command(cmd);
 
     char current_cwd[4096];
+    ASSERT_NOT_NULL(getcwd(current_cwd, sizeof(current_cwd)));
+    ASSERT_EQ_STR("/tmp", current_cwd);
+    const char *oldpwd = getenv("OLDPWD");
+    ASSERT_NOT_NULL(oldpwd);
+    ASSERT_EQ_STR(original_cwd, oldpwd);
+
+    /* cd - should return to original_cwd */
+    cmd = parse_command("cd -", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ret = execute_builtin(cmd, &should_exit, &exit_code);
+    ASSERT_EQ_INT(0, ret);
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    ASSERT_NOT_NULL(getcwd(current_cwd, sizeof(current_cwd)));
+    ASSERT_EQ_STR(original_cwd, current_cwd);
+    oldpwd = getenv("OLDPWD");
+    ASSERT_NOT_NULL(oldpwd);
+    ASSERT_EQ_STR("/tmp", oldpwd);
+
+    /* cd - toggles back to /tmp */
+    cmd = parse_command("cd -", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ret = execute_builtin(cmd, &should_exit, &exit_code);
+    ASSERT_EQ_INT(0, ret);
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
     ASSERT_NOT_NULL(getcwd(current_cwd, sizeof(current_cwd)));
     ASSERT_EQ_STR("/tmp", current_cwd);
 
@@ -289,6 +329,251 @@ static void test_builtin_schedule_determinism(void)
     free_command(cmd2);
 }
 
+static void test_builtin_schedule_compare(void)
+{
+    int rc = -1;
+    command_t *cmd = parse_command("schedule compare demo", NULL);
+    ASSERT_NOT_NULL(cmd);
+    char *out = capture_builtin_output(cmd, &rc);
+    ASSERT_NOT_NULL(out);
+    ASSERT_EQ_INT(0, rc);
+
+    ASSERT_TRUE(strstr(out, "SmartShell CPU Scheduling Algorithm Comparison") != NULL);
+    ASSERT_TRUE(strstr(out, "First-Come, First-Served (FCFS)") != NULL);
+    ASSERT_TRUE(strstr(out, "Shortest Job First (SJF)") != NULL);
+    ASSERT_TRUE(strstr(out, "Round Robin (RR, Q=4)") != NULL);
+    ASSERT_TRUE(strstr(out, "Non-Preemptive Priority") != NULL);
+    ASSERT_TRUE(strstr(out, "Multilevel Feedback Queue (MLFQ)") != NULL);
+    ASSERT_TRUE(strstr(out, "Avg Waiting") != NULL);
+    ASSERT_TRUE(strstr(out, "Avg Turnaround") != NULL);
+    ASSERT_TRUE(strstr(out, "Round Robin Quantum:     4 ticks") != NULL);
+
+    free(out);
+    free_command(cmd);
+
+    /* Test compare with custom quantum */
+    cmd = parse_command("schedule compare demo 2", NULL);
+    ASSERT_NOT_NULL(cmd);
+    out = capture_builtin_output(cmd, &rc);
+    ASSERT_NOT_NULL(out);
+    ASSERT_EQ_INT(0, rc);
+
+    ASSERT_TRUE(strstr(out, "Round Robin (RR, Q=2)") != NULL);
+    ASSERT_TRUE(strstr(out, "Round Robin Quantum:     2 ticks") != NULL);
+
+    free(out);
+    free_command(cmd);
+
+    /* Test compare with direct quantum argument */
+    cmd = parse_command("schedule compare 6", NULL);
+    ASSERT_NOT_NULL(cmd);
+    out = capture_builtin_output(cmd, &rc);
+    ASSERT_NOT_NULL(out);
+    ASSERT_EQ_INT(0, rc);
+
+    ASSERT_TRUE(strstr(out, "Round Robin (RR, Q=6)") != NULL);
+    ASSERT_TRUE(strstr(out, "Round Robin Quantum:     6 ticks") != NULL);
+
+    free(out);
+    free_command(cmd);
+}
+
+static void test_builtin_schedule_compare_and_custom_errors(void)
+{
+    bool should_exit = false;
+    int exit_code = 0;
+
+    /* Extra arguments to schedule custom */
+    command_t *cmd = parse_command("schedule custom extra", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Extra arguments to schedule compare demo */
+    cmd = parse_command("schedule compare demo 4 extra", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Invalid quantum in schedule compare demo */
+    cmd = parse_command("schedule compare demo 0", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    cmd = parse_command("schedule compare demo -5", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    cmd = parse_command("schedule compare demo 200", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Unknown compare argument */
+    cmd = parse_command("schedule compare invalid_opt", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+}
+
+static void test_builtin_sysinfo(void)
+{
+    bool should_exit = false;
+    int exit_code = 0;
+
+    command_t *cmd = parse_command("sysinfo", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(0, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Extra argument rejected */
+    cmd = parse_command("sysinfo extra_arg", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+}
+
+static void test_builtin_process_tree(void)
+{
+    bool should_exit = false;
+    int exit_code = 0;
+
+    /* Without argument (full tree) */
+    command_t *cmd = parse_command("process-tree", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(0, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Root process 1 */
+    cmd = parse_command("process-tree 1", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(0, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Nonexistent PID */
+    cmd = parse_command("process-tree 9999999", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Invalid string PID */
+    cmd = parse_command("process-tree abc", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Negative PID */
+    cmd = parse_command("process-tree -5", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Too many arguments */
+    cmd = parse_command("process-tree 1 2", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+}
+
+static void test_builtin_monitor_extended(void)
+{
+    bool should_exit = false;
+    int exit_code = 0;
+
+    /* Sort CPU */
+    command_t *cmd = parse_command("monitor --sort cpu", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(0, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Sort Memory */
+    cmd = parse_command("monitor --sort memory", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(0, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Short option -s cpu */
+    cmd = parse_command("monitor -s cpu", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(0, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Short option -s mem */
+    cmd = parse_command("monitor -s mem", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(0, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Form --sort=cpu */
+    cmd = parse_command("monitor --sort=cpu", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(0, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Missing sort argument */
+    cmd = parse_command("monitor --sort", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Invalid sort field */
+    cmd = parse_command("monitor --sort disk", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Unrecognized option */
+    cmd = parse_command("monitor --badopt", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Specific PID */
+    cmd = parse_command("monitor 1", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(0, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Nonexistent PID */
+    cmd = parse_command("monitor 9999999", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+
+    /* Too many arguments */
+    cmd = parse_command("monitor 1 2", NULL);
+    ASSERT_NOT_NULL(cmd);
+    ASSERT_EQ_INT(1, execute_builtin(cmd, &should_exit, &exit_code));
+    ASSERT_FALSE(should_exit);
+    free_command(cmd);
+}
+
 int main(void)
 {
     TEST_INIT();
@@ -303,6 +588,11 @@ int main(void)
     RUN_TEST(test_builtin_schedule_errors);
     RUN_TEST(test_builtin_schedule_output_capture);
     RUN_TEST(test_builtin_schedule_determinism);
+    RUN_TEST(test_builtin_schedule_compare);
+    RUN_TEST(test_builtin_schedule_compare_and_custom_errors);
+    RUN_TEST(test_builtin_sysinfo);
+    RUN_TEST(test_builtin_process_tree);
+    RUN_TEST(test_builtin_monitor_extended);
 
     TEST_REPORT();
 }

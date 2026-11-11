@@ -2282,6 +2282,335 @@ static void test_memory_lifecycle_reuse(void) {
 }
 
 /* ------------------------------------------------------------------------- */
+/* G. Algorithm Comparison & Phase 10 Tests                                 */
+/* ------------------------------------------------------------------------- */
+
+static void test_compare_single_process(void) {
+    sched_process_t procs[1];
+    sched_process_init(&procs[0], 1, 0, 5, 2);
+
+    sched_compare_result_t cmp;
+    ASSERT_EQ_INT(0, sched_compare_all(procs, 1, 4, &cmp));
+
+    ASSERT_EQ_INT(1, cmp.process_count);
+    ASSERT_EQ_INT(5, cmp.total_burst_time);
+    ASSERT_EQ_INT(4, cmp.rr_quantum);
+
+    /* For single process starting at 0, all algorithms yield identical metrics */
+    ASSERT_DOUBLE_NEAR(0.0, cmp.fcfs.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(5.0, cmp.fcfs.avg_turnaround_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(0.0, cmp.fcfs.avg_response_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(100.0, cmp.fcfs.cpu_utilization, EPSILON);
+
+    ASSERT_DOUBLE_NEAR(0.0, cmp.sjf.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(5.0, cmp.sjf.avg_turnaround_time, EPSILON);
+
+    ASSERT_DOUBLE_NEAR(0.0, cmp.rr.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(5.0, cmp.rr.avg_turnaround_time, EPSILON);
+
+    ASSERT_DOUBLE_NEAR(0.0, cmp.priority.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(5.0, cmp.priority.avg_turnaround_time, EPSILON);
+
+    ASSERT_DOUBLE_NEAR(0.0, cmp.mlfq.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(5.0, cmp.mlfq.avg_turnaround_time, EPSILON);
+
+    sched_compare_result_free(&cmp);
+}
+
+static void test_compare_simultaneous_arrivals(void) {
+    sched_process_t procs[3];
+    sched_process_init(&procs[0], 1, 0, 6, 2);
+    sched_process_init(&procs[1], 2, 0, 2, 1);
+    sched_process_init(&procs[2], 3, 0, 4, 3);
+
+    sched_compare_result_t cmp;
+    ASSERT_EQ_INT(0, sched_compare_all(procs, 3, 3, &cmp));
+
+    ASSERT_EQ_INT(3, cmp.process_count);
+    ASSERT_EQ_INT(12, cmp.total_burst_time);
+    ASSERT_EQ_INT(3, cmp.rr_quantum);
+
+    /* SJF should execute shortest first (P2: 2, P3: 4, P1: 6) giving best WT */
+    ASSERT_TRUE(cmp.sjf.avg_waiting_time <= cmp.fcfs.avg_waiting_time);
+    ASSERT_DOUBLE_NEAR(100.0, cmp.fcfs.cpu_utilization, EPSILON);
+    ASSERT_DOUBLE_NEAR(100.0, cmp.sjf.cpu_utilization, EPSILON);
+    ASSERT_DOUBLE_NEAR(100.0, cmp.rr.cpu_utilization, EPSILON);
+    ASSERT_DOUBLE_NEAR(100.0, cmp.priority.cpu_utilization, EPSILON);
+    ASSERT_DOUBLE_NEAR(100.0, cmp.mlfq.cpu_utilization, EPSILON);
+
+    sched_compare_result_free(&cmp);
+}
+
+static void test_compare_staggered_arrivals(void) {
+    sched_process_t procs[3];
+    sched_process_init(&procs[0], 1, 0, 5, 2);
+    sched_process_init(&procs[1], 2, 2, 3, 1);
+    sched_process_init(&procs[2], 3, 4, 2, 3);
+
+    sched_compare_result_t cmp;
+    ASSERT_EQ_INT(0, sched_compare_all(procs, 3, 2, &cmp));
+
+    ASSERT_EQ_INT(3, cmp.process_count);
+    ASSERT_EQ_INT(10, cmp.total_burst_time);
+    ASSERT_EQ_INT(10, cmp.fcfs.total_busy_time);
+    ASSERT_EQ_INT(10, cmp.sjf.total_busy_time);
+    ASSERT_EQ_INT(10, cmp.rr.total_busy_time);
+    ASSERT_EQ_INT(10, cmp.priority.total_busy_time);
+    ASSERT_EQ_INT(10, cmp.mlfq.total_busy_time);
+
+    sched_compare_result_free(&cmp);
+}
+
+static void test_compare_custom_rr_quantum(void) {
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 8, 1);
+    sched_process_init(&procs[1], 2, 0, 4, 2);
+
+    sched_compare_result_t cmp2, cmp8;
+    ASSERT_EQ_INT(0, sched_compare_all(procs, 2, 2, &cmp2));
+    ASSERT_EQ_INT(0, sched_compare_all(procs, 2, 8, &cmp8));
+
+    /* FCFS and SJF must be completely identical across quantum runs */
+    ASSERT_DOUBLE_NEAR(cmp2.fcfs.avg_waiting_time, cmp8.fcfs.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(cmp2.sjf.avg_waiting_time, cmp8.sjf.avg_waiting_time, EPSILON);
+
+    /* RR with Q=2 time-slices P1 (runs 2), so P2 response time is 2 */
+    ASSERT_DOUBLE_NEAR(1.0, cmp2.rr.avg_response_time, EPSILON);
+    /* RR with Q=8 lets P1 run to completion (8), so P2 response time is 8 */
+    ASSERT_DOUBLE_NEAR(4.0, cmp8.rr.avg_response_time, EPSILON);
+
+    sched_compare_result_free(&cmp2);
+    sched_compare_result_free(&cmp8);
+}
+
+static void test_compare_identical_input_independence(void) {
+    sched_process_t procs[3];
+    sched_process_init(&procs[0], 1, 0, 6, 2);
+    sched_process_init(&procs[1], 2, 1, 4, 1);
+    sched_process_init(&procs[2], 3, 2, 3, 3);
+
+    /* Keep a clone of the initial procs array to check for mutation */
+    sched_process_t original[3];
+    memcpy(original, procs, sizeof(procs));
+
+    sched_compare_result_t cmp;
+    ASSERT_EQ_INT(0, sched_compare_all(procs, 3, 4, &cmp));
+
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ_INT(original[i].pid, procs[i].pid);
+        ASSERT_EQ_INT(original[i].arrival_time, procs[i].arrival_time);
+        ASSERT_EQ_INT(original[i].burst_time, procs[i].burst_time);
+        ASSERT_EQ_INT(original[i].priority, procs[i].priority);
+        ASSERT_EQ_INT(original[i].remaining_time, procs[i].remaining_time);
+        ASSERT_EQ_INT(original[i].start_time, procs[i].start_time);
+        ASSERT_EQ_INT(original[i].completion_time, procs[i].completion_time);
+    }
+
+    sched_compare_result_free(&cmp);
+}
+
+static void test_compare_demo_workload_metrics(void) {
+    sched_process_t workload[5];
+    sched_process_init(&workload[0], 1, 0,  8, 3);
+    sched_process_init(&workload[1], 2, 1,  4, 1);
+    sched_process_init(&workload[2], 3, 3,  9, 4);
+    sched_process_init(&workload[3], 4, 5,  2, 2);
+    sched_process_init(&workload[4], 5, 26, 4, 2);
+
+    sched_compare_result_t cmp;
+    ASSERT_EQ_INT(0, sched_compare_all(workload, 5, 4, &cmp));
+
+    /* Verify exact calculated metrics for the canonical demo workload */
+    ASSERT_DOUBLE_NEAR(6.40, cmp.fcfs.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(11.80, cmp.fcfs.avg_turnaround_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(6.40, cmp.fcfs.avg_response_time, EPSILON);
+
+    ASSERT_DOUBLE_NEAR(4.60, cmp.sjf.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(10.00, cmp.sjf.avg_turnaround_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(4.60, cmp.sjf.avg_response_time, EPSILON);
+
+    ASSERT_DOUBLE_NEAR(6.60, cmp.rr.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(12.00, cmp.rr.avg_turnaround_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(3.80, cmp.rr.avg_response_time, EPSILON);
+
+    ASSERT_DOUBLE_NEAR(5.00, cmp.priority.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(10.40, cmp.priority.avg_turnaround_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(5.00, cmp.priority.avg_response_time, EPSILON);
+
+    ASSERT_DOUBLE_NEAR(6.20, cmp.mlfq.avg_waiting_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(11.60, cmp.mlfq.avg_turnaround_time, EPSILON);
+    ASSERT_DOUBLE_NEAR(3.00, cmp.mlfq.avg_response_time, EPSILON);
+
+    ASSERT_EQ_INT(30, cmp.fcfs.total_elapsed_time);
+    ASSERT_EQ_INT(27, cmp.fcfs.total_busy_time);
+    ASSERT_EQ_INT(3, cmp.fcfs.total_idle_time);
+
+    sched_compare_result_free(&cmp);
+}
+
+static void test_compare_render_table(void) {
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 4, 1);
+    sched_process_init(&procs[1], 2, 1, 2, 2);
+
+    sched_compare_result_t cmp;
+    ASSERT_EQ_INT(0, sched_compare_all(procs, 2, 4, &cmp));
+
+    char *table = sched_render_comparison(&cmp);
+    ASSERT_NOT_NULL(table);
+
+    ASSERT_NOT_NULL(strstr(table, "SmartShell CPU Scheduling Algorithm Comparison"));
+    ASSERT_NOT_NULL(strstr(table, "First-Come, First-Served (FCFS)"));
+    ASSERT_NOT_NULL(strstr(table, "Shortest Job First (SJF)"));
+    ASSERT_NOT_NULL(strstr(table, "Round Robin (RR, Q=4)"));
+    ASSERT_NOT_NULL(strstr(table, "Non-Preemptive Priority"));
+    ASSERT_NOT_NULL(strstr(table, "Multilevel Feedback Queue (MLFQ)"));
+    ASSERT_NOT_NULL(strstr(table, "Avg Waiting"));
+    ASSERT_NOT_NULL(strstr(table, "Avg Turnaround"));
+    ASSERT_NOT_NULL(strstr(table, "Avg Response"));
+    ASSERT_NOT_NULL(strstr(table, "CPU Util"));
+    ASSERT_NOT_NULL(strstr(table, "Simulation Parameters & Policy"));
+    ASSERT_NOT_NULL(strstr(table, "Round Robin Quantum:     4 ticks"));
+
+    free(table);
+
+    char buf[2048];
+    int len = sched_render_comparison_buf(&cmp, buf, sizeof(buf));
+    ASSERT_TRUE(len > 0);
+    ASSERT_NOT_NULL(strstr(buf, "Algorithm Comparison"));
+
+    /* Error handling */
+    ASSERT_NULL(sched_render_comparison(NULL));
+    ASSERT_EQ_INT(-1, sched_render_comparison_buf(NULL, buf, sizeof(buf)));
+
+    sched_compare_result_free(&cmp);
+}
+
+static void test_compare_invalid_inputs(void) {
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 0, 4, 1);
+    sched_process_init(&procs[1], 2, 1, 2, 2);
+
+    sched_compare_result_t cmp;
+
+    /* NULL pointers */
+    ASSERT_EQ_INT(-1, sched_compare_all(NULL, 2, 4, &cmp));
+    ASSERT_EQ_INT(-1, sched_compare_all(procs, 2, 4, NULL));
+
+    /* Zero or negative process count */
+    ASSERT_EQ_INT(-1, sched_compare_all(procs, 0, 4, &cmp));
+    ASSERT_EQ_INT(-1, sched_compare_all(procs, -1, 4, &cmp));
+
+    /* Invalid quantum */
+    ASSERT_EQ_INT(-1, sched_compare_all(procs, 2, 0, &cmp));
+    ASSERT_EQ_INT(-1, sched_compare_all(procs, 2, -5, &cmp));
+
+    /* Invalid process burst time */
+    sched_process_t bad_burst[1];
+    sched_process_init(&bad_burst[0], 1, 0, 0, 1);
+    ASSERT_EQ_INT(-1, sched_compare_all(bad_burst, 1, 4, &cmp));
+
+    bad_burst[0].burst_time = -3;
+    ASSERT_EQ_INT(-1, sched_compare_all(bad_burst, 1, 4, &cmp));
+
+    /* Invalid process arrival time */
+    sched_process_t bad_arr[1];
+    sched_process_init(&bad_arr[0], 1, -1, 4, 1);
+    ASSERT_EQ_INT(-1, sched_compare_all(bad_arr, 1, 4, &cmp));
+}
+
+static void test_compare_memory_cleanup_repeated(void) {
+    sched_process_t procs[3];
+    sched_process_init(&procs[0], 1, 0, 4, 1);
+    sched_process_init(&procs[1], 2, 1, 3, 2);
+    sched_process_init(&procs[2], 3, 2, 2, 3);
+
+    sched_compare_result_t cmp;
+    sched_compare_result_init(&cmp);
+
+    for (int iter = 0; iter < 50; iter++) {
+        ASSERT_EQ_INT(0, sched_compare_all(procs, 3, (iter % 5) + 1, &cmp));
+        ASSERT_EQ_INT(3, cmp.process_count);
+        ASSERT_EQ_INT(9, cmp.total_burst_time);
+        sched_compare_result_free(&cmp);
+    }
+}
+
+static void test_gantt_narrow_terminal_wrapping(void) {
+    /* Create a workload with 6 sequential 1-tick slices */
+    sched_process_t procs[6];
+    for (int i = 0; i < 6; i++) {
+        sched_process_init(&procs[i], i + 1, i, 1, 1);
+    }
+
+    sched_result_t res;
+    sched_result_init(&res);
+    ASSERT_EQ_INT(0, sched_schedule_fcfs(procs, 6, &res));
+
+    /* Render with tight max_cols = 25 so it must wrap into multiple rows */
+    char *gantt = sched_render_gantt_wrapped(&res, 25);
+    ASSERT_NOT_NULL(gantt);
+
+    /* Should contain process bars and boundaries across multiple rows */
+    ASSERT_NOT_NULL(strstr(gantt, "P1"));
+    ASSERT_NOT_NULL(strstr(gantt, "P6"));
+    ASSERT_NOT_NULL(strstr(gantt, "|"));
+
+    /* Verify there is a double newline indicating row separation */
+    ASSERT_NOT_NULL(strstr(gantt, "\n\n"));
+
+    free(gantt);
+    sched_result_free(&res);
+}
+
+static void test_gantt_large_timestamps(void) {
+    sched_process_t procs[2];
+    sched_process_init(&procs[0], 1, 10000, 50, 1);
+    sched_process_init(&procs[1], 2, 10050, 50, 1);
+
+    sched_result_t res;
+    sched_result_init(&res);
+    ASSERT_EQ_INT(0, sched_schedule_fcfs(procs, 2, &res));
+
+    char *gantt = sched_render_gantt(&res);
+    ASSERT_NOT_NULL(gantt);
+
+    /* Timestamps 0, 10000, 10050, 10100 must be formatted without crashing */
+    ASSERT_NOT_NULL(strstr(gantt, "10000"));
+    ASSERT_NOT_NULL(strstr(gantt, "10050"));
+    ASSERT_NOT_NULL(strstr(gantt, "10100"));
+    ASSERT_NOT_NULL(strstr(gantt, "P1"));
+    ASSERT_NOT_NULL(strstr(gantt, "P2"));
+
+    free(gantt);
+    sched_result_free(&res);
+}
+
+static void test_gantt_wrapped_edge_cases(void) {
+    ASSERT_NULL(sched_render_gantt_wrapped(NULL, 76));
+
+    sched_result_t res;
+    sched_result_init(&res);
+
+    char *empty = sched_render_gantt_wrapped(&res, 76);
+    ASSERT_NOT_NULL(empty);
+    ASSERT_EQ_INT(0, (int)strlen(empty));
+    free(empty);
+
+    /* Clamping of very small max_cols */
+    sched_process_t procs[1];
+    sched_process_init(&procs[0], 1, 0, 2, 1);
+    ASSERT_EQ_INT(0, sched_schedule_fcfs(procs, 1, &res));
+
+    char *chart = sched_render_gantt_wrapped(&res, 5);
+    ASSERT_NOT_NULL(chart);
+    ASSERT_NOT_NULL(strstr(chart, "P1"));
+    free(chart);
+
+    sched_result_free(&res);
+}
+
+/* ------------------------------------------------------------------------- */
 /* Main Test Runner                                                          */
 /* ------------------------------------------------------------------------- */
 
@@ -2350,12 +2679,26 @@ int main(void) {
     RUN_TEST(test_gantt_idle_intervals);
     RUN_TEST(test_gantt_rr_repeated_slices);
     RUN_TEST(test_gantt_buffer_and_empty);
+    RUN_TEST(test_gantt_narrow_terminal_wrapping);
+    RUN_TEST(test_gantt_large_timestamps);
+    RUN_TEST(test_gantt_wrapped_edge_cases);
 
     /* Edge Cases & Lifecycle */
     RUN_TEST(test_edge_case_zero_processes);
     RUN_TEST(test_edge_case_invalid_inputs);
     RUN_TEST(test_determinism_fcfs);
     RUN_TEST(test_memory_lifecycle_reuse);
+
+    /* Algorithm Comparison Tests (Phase 10) */
+    RUN_TEST(test_compare_single_process);
+    RUN_TEST(test_compare_simultaneous_arrivals);
+    RUN_TEST(test_compare_staggered_arrivals);
+    RUN_TEST(test_compare_custom_rr_quantum);
+    RUN_TEST(test_compare_identical_input_independence);
+    RUN_TEST(test_compare_demo_workload_metrics);
+    RUN_TEST(test_compare_render_table);
+    RUN_TEST(test_compare_invalid_inputs);
+    RUN_TEST(test_compare_memory_cleanup_repeated);
 
     TEST_REPORT();
 }

@@ -182,14 +182,26 @@ def run_pty_test():
         assert b"smartshell" in out, f"Terminal control corrupted after fg+Ctrl-C: {out}"
         print("  PASS 11: Ctrl-C on foreground job after fg survived and terminal control intact")
 
+        # 12. Phase 11 monitor --watch: starts live loop in raw mode, exits on 'q', restores terminal
+        os.write(master, b"monitor --watch\n")
+        out = read_until(master, b"Press 'q' to quit", timeout=3.0)
+        assert b"Press 'q' to quit" in out, f"monitor --watch didn't start: {out}"
+        os.write(master, b"q")
+        out = read_until(master, b"smartshell> ", timeout=3.0)
+        assert b"smartshell> " in out, f"Failed to return to prompt after q: {out}"
+        os.write(master, b"pwd\n")
+        out = read_until(master, b"smartshell> ", timeout=3.0)
+        assert b"smartshell" in out, f"Terminal settings not properly restored: {out}"
+        print("  PASS 12: 'monitor --watch' entered live loop, exited cleanly on 'q', and restored terminal")
+
         # Exit cleanly
         os.write(master, b"exit 0\n")
         time.sleep(0.3)
         _, status = os.waitpid(pid, 0)
         assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0, f"Shell exited with status {status}"
-        print("  PASS 12: Shell exited cleanly with status 0")
+        print("  PASS 13: Shell exited cleanly with status 0")
 
-        print("\nAll Phase 6 PTY interactive tests PASSED successfully!")
+        print("\nAll Phase 6 & 11 PTY interactive tests PASSED successfully!")
         return 0
 
     except Exception as e:

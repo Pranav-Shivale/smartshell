@@ -1025,7 +1025,7 @@ static int sched_digits(int n) {
     return d;
 }
 
-int sched_render_gantt_buf(const sched_result_t *result, char *buf, size_t size) {
+int sched_render_gantt_wrapped_buf(const sched_result_t *result, char *buf, size_t size, int max_cols) {
     if (!result) {
         return -1;
     }
@@ -1036,16 +1036,16 @@ int sched_render_gantt_buf(const sched_result_t *result, char *buf, size_t size)
         return 0;
     }
 
+    if (max_cols < 20) {
+        max_cols = 20;
+    }
+
     int n = result->timeline_count;
     int *widths = malloc((size_t)n * sizeof(int));
-    int *bars = malloc((size_t)(n + 1) * sizeof(int));
-    if (!widths || !bars) {
-        free(widths);
-        free(bars);
+    if (!widths) {
         return -1;
     }
 
-    bars[0] = 0;
     for (int i = 0; i < n; i++) {
         char label[32];
         if (result->timeline[i].pid == SCHED_PID_IDLE) {
@@ -1063,78 +1063,159 @@ int sched_render_gantt_buf(const sched_result_t *result, char *buf, size_t size)
         if (d_end + 1 > w) w = d_end + 1;
 
         widths[i] = w;
-        bars[i + 1] = bars[i] + 1 + w;
     }
 
-    int total_bar_cols = bars[n] + 1;
-    int line1_len = total_bar_cols + 1; /* bar string + \n */
+    /* Partition timeline into rows of <= max_cols */
+    int *row_starts = malloc(((size_t)n + 1) * sizeof(int));
+    int *row_ends = malloc(((size_t)n + 1) * sizeof(int));
+    if (!row_starts || !row_ends) {
+        free(widths);
+        free(row_starts);
+        free(row_ends);
+        return -1;
+    }
 
-    int last_end_digits = sched_digits(result->timeline[n - 1].end_time);
-    int line2_buf_len = bars[n] + last_end_digits + 2;
+    int num_rows = 0;
+    int cur_start = 0;
+    int cur_cols = 1; /* Opening '|' */
 
-    int total_len = line1_len + line2_buf_len;
+    for (int i = 0; i < n; i++) {
+        int slice_cols = widths[i] + 1; /* content + '|' */
+        if (cur_cols + slice_cols > max_cols && i > cur_start) {
+            row_starts[num_rows] = cur_start;
+            row_ends[num_rows] = i - 1;
+            num_rows++;
+            cur_start = i;
+            cur_cols = 1 + slice_cols;
+        } else {
+            cur_cols += slice_cols;
+        }
+    }
+    row_starts[num_rows] = cur_start;
+    row_ends[num_rows] = n - 1;
+    num_rows++;
 
-    if (buf && size > 0) {
-        char *l1 = malloc((size_t)line1_len + 2);
-        char *l2 = malloc((size_t)line2_buf_len + 2);
-        if (!l1 || !l2) {
+    int total_chars = 0;
+    size_t write_pos = 0;
+
+    for (int r = 0; r < num_rows; r++) {
+        int s = row_starts[r];
+        int e = row_ends[r];
+        int m = e - s + 1; /* Slices in this row */
+
+        int *bars = malloc(((size_t)m + 1) * sizeof(int));
+        if (!bars) {
             free(widths);
-            free(bars);
-            free(l1);
-            free(l2);
+            free(row_starts);
+            free(row_ends);
             return -1;
         }
 
-        memset(l1, ' ', (size_t)total_bar_cols);
-        for (int i = 0; i <= n; i++) {
-            l1[bars[i]] = '|';
+        bars[0] = 0;
+        for (int j = 0; j < m; j++) {
+            bars[j + 1] = bars[j] + 1 + widths[s + j];
         }
-        for (int i = 0; i < n; i++) {
+
+        int total_bar_cols = bars[m] + 1;
+        int line1_len = total_bar_cols + 1;
+
+        int last_end_digits = sched_digits(result->timeline[e].end_time);
+        int line2_buf_len = bars[m] + last_end_digits + 2;
+
+        char *l1 = malloc((size_t)line1_len + 2);
+        char *l2 = malloc((size_t)line2_buf_len + 2);
+        if (!l1 || !l2) {
+            free(bars);
+            free(l1);
+            free(l2);
+            free(widths);
+            free(row_starts);
+            free(row_ends);
+            return -1;
+        }
+
+        /* Build Line 1 */
+        memset(l1, ' ', (size_t)total_bar_cols);
+        for (int j = 0; j <= m; j++) {
+            l1[bars[j]] = '|';
+        }
+        for (int j = 0; j < m; j++) {
+            int idx = s + j;
             char label[32];
-            if (result->timeline[i].pid == SCHED_PID_IDLE) {
+            if (result->timeline[idx].pid == SCHED_PID_IDLE) {
                 snprintf(label, sizeof(label), "IDLE");
             } else {
-                snprintf(label, sizeof(label), "P%d", result->timeline[i].pid);
+                snprintf(label, sizeof(label), "P%d", result->timeline[idx].pid);
             }
             int label_len = (int)strlen(label);
-            int pad = (widths[i] - label_len) / 2;
-            int start_col = bars[i] + 1 + pad;
+            int pad = (widths[idx] - label_len) / 2;
+            int start_col = bars[j] + 1 + pad;
             memcpy(&l1[start_col], label, (size_t)label_len);
         }
         l1[total_bar_cols] = '\n';
         l1[total_bar_cols + 1] = '\0';
 
-        memset(l2, ' ', (size_t)(bars[n] + last_end_digits + 1));
-        for (int i = 0; i < n; i++) {
+        /* Build Line 2 */
+        memset(l2, ' ', (size_t)(bars[m] + last_end_digits + 1));
+        for (int j = 0; j < m; j++) {
+            int idx = s + j;
             char num[32];
-            int nlen = snprintf(num, sizeof(num), "%d", result->timeline[i].start_time);
-            memcpy(&l2[bars[i]], num, (size_t)nlen);
+            int nlen = snprintf(num, sizeof(num), "%d", result->timeline[idx].start_time);
+            memcpy(&l2[bars[j]], num, (size_t)nlen);
         }
         char end_num[32];
-        int end_nlen = snprintf(end_num, sizeof(end_num), "%d", result->timeline[n - 1].end_time);
-        memcpy(&l2[bars[n]], end_num, (size_t)end_nlen);
+        int end_nlen = snprintf(end_num, sizeof(end_num), "%d", result->timeline[e].end_time);
+        memcpy(&l2[bars[m]], end_num, (size_t)end_nlen);
 
-        int l2_end = bars[n] + end_nlen;
+        int l2_end = bars[m] + end_nlen;
         while (l2_end > 0 && l2[l2_end - 1] == ' ') {
             l2_end--;
         }
         l2[l2_end] = '\n';
         l2[l2_end + 1] = '\0';
 
-        int written = snprintf(buf, size, "%s%s", l1, l2);
+        int l1_actual = (int)strlen(l1);
+        int l2_actual = (int)strlen(l2);
+        int extra_nl = (r < num_rows - 1) ? 1 : 0;
+
+        total_chars += l1_actual + l2_actual + extra_nl;
+
+        if (buf && size > 0) {
+            if (write_pos < size - 1) {
+                size_t space = size - 1 - write_pos;
+                size_t c1 = ((size_t)l1_actual < space) ? (size_t)l1_actual : space;
+                memcpy(buf + write_pos, l1, c1);
+                write_pos += c1;
+            }
+            if (write_pos < size - 1) {
+                size_t space = size - 1 - write_pos;
+                size_t c2 = ((size_t)l2_actual < space) ? (size_t)l2_actual : space;
+                memcpy(buf + write_pos, l2, c2);
+                write_pos += c2;
+            }
+            if (extra_nl && write_pos < size - 1) {
+                buf[write_pos++] = '\n';
+            }
+            buf[write_pos] = '\0';
+        }
+
+        free(bars);
         free(l1);
         free(l2);
-        free(widths);
-        free(bars);
-        return written;
     }
 
     free(widths);
-    free(bars);
-    return total_len;
+    free(row_starts);
+    free(row_ends);
+
+    return total_chars;
 }
 
-char *sched_render_gantt(const sched_result_t *result) {
+int sched_render_gantt_buf(const sched_result_t *result, char *buf, size_t size) {
+    return sched_render_gantt_wrapped_buf(result, buf, size, SCHED_GANTT_DEFAULT_MAX_COLS);
+}
+
+char *sched_render_gantt_wrapped(const sched_result_t *result, int max_cols) {
     if (!result) return NULL;
     if (result->timeline_count == 0) {
         char *empty = malloc(1);
@@ -1142,13 +1223,155 @@ char *sched_render_gantt(const sched_result_t *result) {
         return empty;
     }
 
-    int len = sched_render_gantt_buf(result, NULL, 0);
+    int len = sched_render_gantt_wrapped_buf(result, NULL, 0, max_cols);
     if (len < 0) return NULL;
 
     char *buf = malloc((size_t)len + 16);
     if (!buf) return NULL;
 
-    if (sched_render_gantt_buf(result, buf, (size_t)len + 16) < 0) {
+    if (sched_render_gantt_wrapped_buf(result, buf, (size_t)len + 16, max_cols) < 0) {
+        free(buf);
+        return NULL;
+    }
+    return buf;
+}
+
+char *sched_render_gantt(const sched_result_t *result) {
+    return sched_render_gantt_wrapped(result, SCHED_GANTT_DEFAULT_MAX_COLS);
+}
+
+void sched_compare_result_init(sched_compare_result_t *cmp) {
+    if (!cmp) return;
+    memset(cmp, 0, sizeof(*cmp));
+    sched_result_init(&cmp->fcfs);
+    sched_result_init(&cmp->sjf);
+    sched_result_init(&cmp->rr);
+    sched_result_init(&cmp->priority);
+    sched_result_init(&cmp->mlfq);
+    cmp->rr_quantum = SCHED_DEFAULT_RR_QUANTUM;
+}
+
+void sched_compare_result_free(sched_compare_result_t *cmp) {
+    if (!cmp) return;
+    sched_result_free(&cmp->fcfs);
+    sched_result_free(&cmp->sjf);
+    sched_result_free(&cmp->rr);
+    sched_result_free(&cmp->priority);
+    sched_result_free(&cmp->mlfq);
+    sched_compare_result_init(cmp);
+}
+
+int sched_compare_all(const sched_process_t *procs, int count, int rr_quantum,
+                      sched_compare_result_t *cmp) {
+    if (!cmp || !procs || count <= 0 || rr_quantum <= 0) {
+        return -1;
+    }
+
+    sched_compare_result_init(cmp);
+    cmp->rr_quantum = rr_quantum;
+    cmp->process_count = count;
+
+    int total_burst = 0;
+    for (int i = 0; i < count; i++) {
+        if (procs[i].burst_time <= 0 || procs[i].arrival_time < 0 || procs[i].pid < 0) {
+            return -1;
+        }
+        total_burst += procs[i].burst_time;
+    }
+    cmp->total_burst_time = total_burst;
+
+    /* Execute each algorithm on independent copies */
+    if (sched_schedule_fcfs(procs, count, &cmp->fcfs) != 0) {
+        sched_compare_result_free(cmp);
+        return -1;
+    }
+    if (sched_schedule_sjf(procs, count, &cmp->sjf) != 0) {
+        sched_compare_result_free(cmp);
+        return -1;
+    }
+    if (sched_schedule_rr(procs, count, rr_quantum, &cmp->rr) != 0) {
+        sched_compare_result_free(cmp);
+        return -1;
+    }
+    if (sched_schedule_priority(procs, count, &cmp->priority) != 0) {
+        sched_compare_result_free(cmp);
+        return -1;
+    }
+    if (sched_schedule_mlfq(procs, count, &cmp->mlfq) != 0) {
+        sched_compare_result_free(cmp);
+        return -1;
+    }
+
+    return 0;
+}
+
+int sched_render_comparison_buf(const sched_compare_result_t *cmp, char *buf, size_t size) {
+    if (!cmp) {
+        return -1;
+    }
+
+    char rr_name[64];
+    snprintf(rr_name, sizeof(rr_name), "Round Robin (RR, Q=%d)", cmp->rr_quantum);
+
+    char tmp[4096];
+    int offset = snprintf(tmp, sizeof(tmp),
+        "SmartShell CPU Scheduling Algorithm Comparison\n"
+        "Workload: %d processes (Total Workload Burst: %d ticks)\n\n"
+        "-------------------------------------------------------------------------------------------------------\n"
+        "Algorithm                         Avg Waiting  Avg Turnaround  Avg Response  CPU Util  Elapsed Busy Idle\n"
+        "-------------------------------------------------------------------------------------------------------\n"
+        "%-32s %12.2f %15.2f %13.2f %8.2f%% %8d %4d %4d\n"
+        "%-32s %12.2f %15.2f %13.2f %8.2f%% %8d %4d %4d\n"
+        "%-32s %12.2f %15.2f %13.2f %8.2f%% %8d %4d %4d\n"
+        "%-32s %12.2f %15.2f %13.2f %8.2f%% %8d %4d %4d\n"
+        "%-32s %12.2f %15.2f %13.2f %8.2f%% %8d %4d %4d\n"
+        "-------------------------------------------------------------------------------------------------------\n\n"
+        "Simulation Parameters & Policy:\n"
+        "  Round Robin Quantum:     %d ticks\n"
+        "  MLFQ Queue Architecture: Q0 (RR, Q=%d) -> Q1 (RR, Q=%d) -> Q2 (FCFS)\n"
+        "  MLFQ Priority Boost:     Starvation prevention boost every %d ticks\n"
+        "  Total Workload Busy:     %d ticks\n",
+        cmp->process_count, cmp->total_burst_time,
+        "First-Come, First-Served (FCFS)",
+        cmp->fcfs.avg_waiting_time, cmp->fcfs.avg_turnaround_time, cmp->fcfs.avg_response_time,
+        cmp->fcfs.cpu_utilization, cmp->fcfs.total_elapsed_time, cmp->fcfs.total_busy_time, cmp->fcfs.total_idle_time,
+        "Shortest Job First (SJF)",
+        cmp->sjf.avg_waiting_time, cmp->sjf.avg_turnaround_time, cmp->sjf.avg_response_time,
+        cmp->sjf.cpu_utilization, cmp->sjf.total_elapsed_time, cmp->sjf.total_busy_time, cmp->sjf.total_idle_time,
+        rr_name,
+        cmp->rr.avg_waiting_time, cmp->rr.avg_turnaround_time, cmp->rr.avg_response_time,
+        cmp->rr.cpu_utilization, cmp->rr.total_elapsed_time, cmp->rr.total_busy_time, cmp->rr.total_idle_time,
+        "Non-Preemptive Priority",
+        cmp->priority.avg_waiting_time, cmp->priority.avg_turnaround_time, cmp->priority.avg_response_time,
+        cmp->priority.cpu_utilization, cmp->priority.total_elapsed_time, cmp->priority.total_busy_time, cmp->priority.total_idle_time,
+        "Multilevel Feedback Queue (MLFQ)",
+        cmp->mlfq.avg_waiting_time, cmp->mlfq.avg_turnaround_time, cmp->mlfq.avg_response_time,
+        cmp->mlfq.cpu_utilization, cmp->mlfq.total_elapsed_time, cmp->mlfq.total_busy_time, cmp->mlfq.total_idle_time,
+        cmp->rr_quantum,
+        SCHED_MLFQ_Q0_QUANTUM, SCHED_MLFQ_Q1_QUANTUM,
+        SCHED_MLFQ_BOOST_INTERVAL,
+        cmp->total_burst_time);
+
+    if (offset < 0) {
+        return -1;
+    }
+
+    if (buf && size > 0) {
+        snprintf(buf, size, "%s", tmp);
+    }
+
+    return offset;
+}
+
+char *sched_render_comparison(const sched_compare_result_t *cmp) {
+    if (!cmp) return NULL;
+    int len = sched_render_comparison_buf(cmp, NULL, 0);
+    if (len < 0) return NULL;
+
+    char *buf = malloc((size_t)len + 16);
+    if (!buf) return NULL;
+
+    if (sched_render_comparison_buf(cmp, buf, (size_t)len + 16) < 0) {
         free(buf);
         return NULL;
     }
