@@ -28,6 +28,16 @@ struct mg_connection;
 #define PTY_READ_CHUNK_SIZE         4096  /* Read chunk size for multiplexer */
 #define WS_MAX_PAYLOAD_SIZE         65536 /* 64KB max incoming WebSocket frame */
 
+/*
+ * Per-WebSocket-connection state for terminal sessions.
+ */
+typedef struct {
+    char session_id[PTY_SESSION_ID_HEX_LEN + 1];
+    bool authenticated;
+    time_t connected_at;
+    struct mg_connection *conn;
+} ws_conn_data_t;
+
 /* Session lifecycle status */
 typedef enum {
     PTY_STATUS_CREATED = 0,    /* Created via REST; waiting for WebSocket connect */
@@ -122,9 +132,27 @@ void pty_session_attach_conn(pty_session_t *session, struct mg_connection *conn)
 
 /*
  * Detach a WebSocket connection when closed.
+ * Only clears conn if matching the currently attached connection.
  * Transitions session to PTY_STATUS_DISCONNECTED and starts grace timer.
  */
-void pty_session_detach_conn(pty_session_t *session);
+void pty_session_detach_conn(pty_session_t *session, struct mg_connection *conn);
+
+#define WS_AUTH_TIMEOUT_SEC         5     /* Unauthenticated connection timeout */
+
+/*
+ * Track pending unauthenticated connection for timeout enforcement.
+ */
+void pty_session_add_pending_auth(struct mg_connection *conn);
+
+/*
+ * Remove connection from pending unauthenticated tracking.
+ */
+void pty_session_remove_pending_auth(const struct mg_connection *conn);
+
+/*
+ * Check pending unauthenticated WebSocket connections and close timed-out ones.
+ */
+void pty_session_check_auth_timeouts(void);
 
 /*
  * Write input data (keystrokes, commands, Ctrl+C, Ctrl+Z) to the PTY master FD.

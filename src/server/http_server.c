@@ -33,13 +33,6 @@ static struct mg_context *g_ctx = NULL;
 static volatile sig_atomic_t g_stop_requested = 0;
 static server_config_t g_config;
 
-/*
- * Per-WebSocket-connection state for terminal sessions.
- */
-typedef struct {
-    char session_id[PTY_SESSION_ID_HEX_LEN + 1];
-    bool authenticated;
-} ws_conn_data_t;
 
 /* ---- Utility Helpers --------------------------------------------------- */
 
@@ -734,6 +727,19 @@ static void ws_send_error(struct mg_connection *conn, const char *message)
     cJSON_Delete(msg);
 }
 
+static void send_ws_handshake_error(struct mg_connection *conn, int status, const char *reason)
+{
+    const char *status_text = (status == 403) ? "Forbidden" : "Bad Request";
+    mg_printf(conn,
+              "HTTP/1.1 %d %s\r\n"
+              "Content-Type: text/plain\r\n"
+              "Content-Length: %zu\r\n"
+              "Connection: close\r\n"
+              "\r\n"
+              "%s",
+              status, status_text, strlen(reason), reason);
+}
+
 /*
  * WebSocket connect handler — called before the handshake.
  * Validates Host and Origin headers. Returns 0 to accept, 1 to reject.
@@ -746,35 +752,37 @@ static int ws_terminal_connect(const struct mg_connection *conn, void *cbdata)
 
     /* Validate Host header */
     const char *host = mg_get_header(conn, "Host");
-    if (!auth_validate_host(host, g_config.port)) {
+    if (host == NULL || !auth_validate_host(host, g_config.port)) {
+        send_ws_handshake_error((struct mg_connection *)conn, 403, "invalid Host header");
         return 1;
     }
 
-    /* Validate Origin header */
+    /*
+     * Validate Origin header:
+     * Browser WebSocket requests MUST include a valid local Origin header.
+     * Reject connections with missing, empty, or non-local Origin headers.
+     */
     const char *origin = mg_get_header(conn, "Origin");
+    if (origin == NULL || origin[0] == '\0') {
+        send_ws_handshake_error((struct mg_connection *)conn, 403, "missing Origin header");
+        return 1;
+    }
     if (!auth_validate_origin(origin, g_config.port)) {
+        send_ws_handshake_error((struct mg_connection *)conn, 403, "invalid Origin header");
         return 1;
     }
 
-    /* If query string parameters are provided, validate ticket during handshake */
-    if (ri->query_string != NULL && ri->query_string[0] != '\0') {
-        char sid[64] = {0};
-        char tk[128] = {0};
-        int s_len = mg_get_var(ri->query_string, strlen(ri->query_string), "session_id", sid, sizeof(sid));
-        int t_len = mg_get_var(ri->query_string, strlen(ri->query_string), "ticket", tk, sizeof(tk));
-        if (s_len > 0 || t_len > 0) {
-            if (s_len <= 0 || t_len <= 0 || !pty_session_authenticate_ticket(sid, tk)) {
-                return 1; /* Reject handshake with 403 Forbidden */
-            }
-        }
-    }
+    /*
+     * Query-string authentication has been completely removed.
+     * All authentication happens strictly via the in-band first message.
+     */
 
     return 0; /* Accept connection */
 }
 
 /*
  * WebSocket ready handler — called after successful handshake.
- * Allocates per-connection state.
+ * Allocates per-connection state and begins auth timeout window.
  */
 static void ws_terminal_ready(struct mg_connection *conn, void *cbdata)
 {
@@ -786,30 +794,13 @@ static void ws_terminal_ready(struct mg_connection *conn, void *cbdata)
     }
     cd->authenticated = false;
     cd->session_id[0] = '\0';
-
-    const struct mg_request_info *ri = mg_get_request_info(conn);
-    if (ri != NULL && ri->query_string != NULL && ri->query_string[0] != '\0') {
-        char sid[64] = {0};
-        int s_len = mg_get_var(ri->query_string, strlen(ri->query_string), "session_id", sid, sizeof(sid));
-        if (s_len > 0) {
-            strncpy(cd->session_id, sid, PTY_SESSION_ID_HEX_LEN);
-            cd->session_id[PTY_SESSION_ID_HEX_LEN] = '\0';
-            cd->authenticated = true;
-            pty_session_t *session = pty_session_find(cd->session_id);
-            if (session != NULL) {
-                pty_session_attach_conn(session, conn);
-            }
-            cJSON *ok = cJSON_CreateObject();
-            if (ok != NULL) {
-                cJSON_AddStringToObject(ok, "type", "auth_ok");
-                cJSON_AddStringToObject(ok, "session_id", cd->session_id);
-                ws_send_json(conn, ok);
-                cJSON_Delete(ok);
-            }
-        }
-    }
+    cd->connected_at = time(NULL);
+    cd->conn = conn;
 
     mg_set_user_connection_data(conn, cd);
+
+    /* Track pending unauthenticated connection for timeout enforcement */
+    pty_session_add_pending_auth(conn);
 }
 
 /*
@@ -871,6 +862,13 @@ static int ws_terminal_data(struct mg_connection *conn, int bits,
 
     /* --- Authentication (must be first message) --- */
     if (!cd->authenticated) {
+        /* Check authentication timeout */
+        if ((time(NULL) - cd->connected_at) >= WS_AUTH_TIMEOUT_SEC) {
+            cJSON_Delete(msg);
+            ws_send_error(conn, "authentication timeout");
+            return 0;
+        }
+
         if (strcmp(type, "auth") != 0) {
             cJSON_Delete(msg);
             ws_send_error(conn, "authentication required");
@@ -892,6 +890,8 @@ static int ws_terminal_data(struct mg_connection *conn, int bits,
         }
 
         /* Authentication succeeded */
+        pty_session_remove_pending_auth(conn);
+
         strncpy(cd->session_id, sid->valuestring, PTY_SESSION_ID_HEX_LEN);
         cd->session_id[PTY_SESSION_ID_HEX_LEN] = '\0';
         cd->authenticated = true;
@@ -961,13 +961,15 @@ static int ws_terminal_data(struct mg_connection *conn, int bits,
 static void ws_terminal_close(const struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
+    pty_session_remove_pending_auth(conn);
+
     ws_conn_data_t *cd = (ws_conn_data_t *)mg_get_user_connection_data(conn);
     if (cd == NULL) return;
 
     if (cd->authenticated && cd->session_id[0] != '\0') {
         pty_session_t *session = pty_session_find(cd->session_id);
         if (session != NULL) {
-            pty_session_detach_conn(session);
+            pty_session_detach_conn(session, (struct mg_connection *)conn);
         }
     }
 
@@ -1376,7 +1378,9 @@ int server_start(const server_config_t *config)
     civetweb_options[opt_idx++] = "num_threads";
     civetweb_options[opt_idx++] = "4";
     civetweb_options[opt_idx++] = "request_timeout_ms";
-    civetweb_options[opt_idx++] = "30000";
+    civetweb_options[opt_idx++] = "5000";
+    civetweb_options[opt_idx++] = "websocket_timeout_ms";
+    civetweb_options[opt_idx++] = "5000";
     civetweb_options[opt_idx++] = "enable_keep_alive";
     civetweb_options[opt_idx++] = "yes";
     civetweb_options[opt_idx++] = "keep_alive_timeout_ms";

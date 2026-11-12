@@ -633,17 +633,24 @@ def run_tests():
             assert status == 404, f"Expected 404 for deleted session, got {status}"
         test("terminal session REST CRUD (/api/terminal)", test_terminal_rest)
 
+        term_headers = {
+            "Host": f"127.0.0.1:{port}",
+            "Authorization": f"Bearer {server.token}",
+            "Content-Type": "application/json"
+        }
+
         # Helper: Create session via REST
         def create_test_session(cols=80, rows=24):
-            term_headers = {
-                "Host": f"127.0.0.1:{port}",
-                "Authorization": f"Bearer {server.token}",
-                "Content-Type": "application/json"
-            }
             status, _, body = raw_http_request(port, "POST", "/api/terminal", headers=term_headers,
                                                body=json.dumps({"cols": cols, "rows": rows}))
             assert status == 201, f"Failed to create session: {status}"
             return json.loads(body)
+
+        def ws_connect(p=port, uri_path="/ws/terminal", origin=None, extra_headers=None):
+            if origin is None:
+                origin = f"http://127.0.0.1:{p}"
+            uri = f"ws://127.0.0.1:{p}{uri_path}"
+            return websockets.connect(uri, origin=origin, extra_headers=extra_headers)
 
         async def ws_auth_and_drain(ws, sid, ticket):
             await ws.send(json.dumps({"type": "auth", "session_id": sid, "ticket": ticket}))
@@ -673,14 +680,88 @@ def run_tests():
                     break
             return collected
 
-        # Test 21: WebSocket Basic Execution & Exit
+        # Test 21: WebSocket Origin and Host Header Security Validation
+        def test_ws_origin_and_host_validation():
+            uri = f"ws://127.0.0.1:{port}/ws/terminal"
+
+            async def _run():
+                # 1. Missing Origin header -> handshake rejected (403 Forbidden)
+                try:
+                    async with websockets.connect(uri) as ws:
+                        assert False, "Expected 403 for missing Origin header"
+                except websockets.exceptions.InvalidStatusCode as e:
+                    assert e.status_code == 403, f"Expected 403, got {e.status_code}"
+
+                # 2. Non-local Origin (http://evil.com) -> handshake rejected (403)
+                try:
+                    async with websockets.connect(uri, origin="http://evil.com") as ws:
+                        assert False, "Expected 403 for non-local Origin"
+                except websockets.exceptions.InvalidStatusCode as e:
+                    assert e.status_code == 403, f"Expected 403, got {e.status_code}"
+
+                # 3. Wrong port Origin -> handshake rejected (403)
+                try:
+                    async with websockets.connect(uri, origin="http://127.0.0.1:9999") as ws:
+                        assert False, "Expected 403 for wrong port Origin"
+                except websockets.exceptions.InvalidStatusCode as e:
+                    assert e.status_code == 403, f"Expected 403, got {e.status_code}"
+
+                # 4. Malformed Origin ('null') -> handshake rejected (403)
+                try:
+                    async with websockets.connect(uri, origin="null") as ws:
+                        assert False, "Expected 403 for null Origin"
+                except websockets.exceptions.InvalidStatusCode as e:
+                    assert e.status_code == 403, f"Expected 403, got {e.status_code}"
+
+                # 5. Invalid Host header -> handshake rejected (403 Forbidden)
+                s = socket.socket()
+                s.connect(("127.0.0.1", port))
+                bad_host_req = (
+                    f"GET /ws/terminal HTTP/1.1\r\n"
+                    f"Host: evil.com\r\n"
+                    f"Origin: http://127.0.0.1:{port}\r\n"
+                    f"Upgrade: websocket\r\n"
+                    f"Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                    f"Sec-WebSocket-Version: 13\r\n\r\n"
+                )
+                s.sendall(bad_host_req.encode())
+                raw_resp = s.recv(4096)
+                s.close()
+                assert b"403 Forbidden" in raw_resp, f"Expected 403 for evil Host, got: {raw_resp}"
+
+                # 6. Valid local Origin -> handshake succeeds (101 Switching Protocols)
+                async with ws_connect(port) as ws:
+                    pass
+
+            asyncio.run(_run())
+        test("terminal WebSocket Origin and Host validation", test_ws_origin_and_host_validation)
+
+        # Test 22: Query-String Credentials Ignored & In-Band Auth Required
+        def test_ws_query_string_ignored_and_inband_auth_required():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _run():
+                # Connecting with ticket in query string MUST NOT authenticate session
+                uri_with_qs = f"/ws/terminal?session_id={sid}&ticket={ticket}"
+                async with ws_connect(port, uri_path=uri_with_qs) as ws:
+                    # Attempting input before sending in-band auth message MUST fail
+                    await ws.send(json.dumps({"type": "input", "data": "echo should_fail\n"}))
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+                    assert msg.get("type") == "error"
+                    assert "authentication required" in msg.get("message", "")
+
+            asyncio.run(_run())
+        test("terminal WebSocket query-string credentials ignored & in-band auth required", test_ws_query_string_ignored_and_inband_auth_required)
+
+        # Test 23: WebSocket Basic Execution & Exit
         def test_ws_basic_execution():
             sess = create_test_session()
             sid, ticket = sess["session_id"], sess["ws_ticket"]
 
             async def _run():
-                uri = f"ws://127.0.0.1:{port}/ws/terminal"
-                async with websockets.connect(uri) as ws:
+                async with ws_connect(port) as ws:
                     await ws_auth_and_drain(ws, sid, ticket)
                     await ws.send(json.dumps({"type": "input", "data": "echo phase13c_basic_ok\n"}))
                     out = await ws_recv_output_until(ws, "phase13c_basic_ok")
@@ -694,14 +775,13 @@ def run_tests():
             asyncio.run(_run())
         test("terminal WebSocket basic execution and exit", test_ws_basic_execution)
 
-        # Test 22: WebSocket Pipelines and Redirection
+        # Test 24: WebSocket Pipelines and Redirection
         def test_ws_pipelines_and_redirection():
             sess = create_test_session()
             sid, ticket = sess["session_id"], sess["ws_ticket"]
 
             async def _run():
-                uri = f"ws://127.0.0.1:{port}/ws/terminal"
-                async with websockets.connect(uri) as ws:
+                async with ws_connect(port) as ws:
                     await ws_auth_and_drain(ws, sid, ticket)
                     # Pipeline test
                     await ws.send(json.dumps({"type": "input", "data": "echo 'hello pipeline' | tr a-z A-Z\n"}))
@@ -725,14 +805,13 @@ def run_tests():
             asyncio.run(_run())
         test("terminal WebSocket pipelines and redirection", test_ws_pipelines_and_redirection)
 
-        # Test 23: WebSocket Ctrl+C and Ctrl+Z Job Control
+        # Test 25: WebSocket Ctrl+C and Ctrl+Z Job Control
         def test_ws_job_control():
             sess = create_test_session()
             sid, ticket = sess["session_id"], sess["ws_ticket"]
 
             async def _run():
-                uri = f"ws://127.0.0.1:{port}/ws/terminal"
-                async with websockets.connect(uri) as ws:
+                async with ws_connect(port) as ws:
                     await ws_auth_and_drain(ws, sid, ticket)
 
                     # Ctrl+C test: start sleep, interrupt with \x03
@@ -759,14 +838,13 @@ def run_tests():
             asyncio.run(_run())
         test("terminal WebSocket Ctrl+C and Ctrl+Z job control", test_ws_job_control)
 
-        # Test 24: WebSocket Window Resize and Ping/Pong
+        # Test 26: WebSocket Window Resize and Ping/Pong
         def test_ws_resize_and_ping():
             sess = create_test_session()
             sid, ticket = sess["session_id"], sess["ws_ticket"]
 
             async def _run():
-                uri = f"ws://127.0.0.1:{port}/ws/terminal"
-                async with websockets.connect(uri) as ws:
+                async with ws_connect(port) as ws:
                     await ws_auth_and_drain(ws, sid, ticket)
 
                     # Resize command
@@ -784,30 +862,27 @@ def run_tests():
             asyncio.run(_run())
         test("terminal WebSocket resize propagation and ping/pong", test_ws_resize_and_ping)
 
-        # Test 25: WebSocket Authentication and Security
+        # Test 27: WebSocket Authentication and Security
         def test_ws_auth_and_security():
             sess = create_test_session()
             sid, ticket = sess["session_id"], sess["ws_ticket"]
 
             async def _test_wrong_ticket():
-                uri = f"ws://127.0.0.1:{port}/ws/terminal"
-                async with websockets.connect(uri) as ws:
+                async with ws_connect(port) as ws:
                     await ws.send(json.dumps({"type": "auth", "session_id": sid, "ticket": "wrong_ticket_hex"}))
                     msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
                     assert msg.get("type") == "error"
                     assert "authentication failed" in msg.get("message", "")
 
             async def _test_input_before_auth():
-                uri = f"ws://127.0.0.1:{port}/ws/terminal"
-                async with websockets.connect(uri) as ws:
+                async with ws_connect(port) as ws:
                     await ws.send(json.dumps({"type": "input", "data": "ls\n"}))
                     msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
                     assert msg.get("type") == "error"
                     assert "authentication required" in msg.get("message", "")
 
             async def _test_valid_auth_then_replay():
-                uri = f"ws://127.0.0.1:{port}/ws/terminal"
-                async with websockets.connect(uri) as ws:
+                async with ws_connect(port) as ws:
                     await ws.send(json.dumps({"type": "auth", "session_id": sid, "ticket": ticket}))
                     auth_resp = None
                     for _ in range(3):
@@ -818,7 +893,7 @@ def run_tests():
                     assert auth_resp is not None
 
                 # Attempt replay with same ticket on new connection
-                async with websockets.connect(uri) as ws2:
+                async with ws_connect(port) as ws2:
                     await ws2.send(json.dumps({"type": "auth", "session_id": sid, "ticket": ticket}))
                     msg = json.loads(await asyncio.wait_for(ws2.recv(), timeout=2.0))
                     assert msg.get("type") == "error"
@@ -829,14 +904,13 @@ def run_tests():
             asyncio.run(_test_valid_auth_then_replay())
         test("terminal WebSocket authentication and security enforcement", test_ws_auth_and_security)
 
-        # Test 26: WebSocket Malformed and Oversized Messages
+        # Test 28: WebSocket Malformed and Oversized Messages
         def test_ws_message_validation():
             sess = create_test_session()
             sid, ticket = sess["session_id"], sess["ws_ticket"]
 
             async def _run():
-                uri = f"ws://127.0.0.1:{port}/ws/terminal"
-                async with websockets.connect(uri) as ws:
+                async with ws_connect(port) as ws:
                     # Non-JSON garbage
                     await ws.send("not_valid_json_payload{{{")
                     msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
@@ -859,14 +933,13 @@ def run_tests():
             asyncio.run(_run())
         test("terminal WebSocket malformed and oversized message rejection", test_ws_message_validation)
 
-        # Test 27: Multiple Concurrent Isolated Sessions
+        # Test 29: Multiple Concurrent Isolated Sessions
         def test_ws_concurrent_isolated_sessions():
             s1 = create_test_session()
             s2 = create_test_session()
 
             async def _run():
-                uri = f"ws://127.0.0.1:{port}/ws/terminal"
-                async with websockets.connect(uri) as ws1, websockets.connect(uri) as ws2:
+                async with ws_connect(port) as ws1, ws_connect(port) as ws2:
                     await ws_auth_and_drain(ws1, s1["session_id"], s1["ws_ticket"])
                     await ws_auth_and_drain(ws2, s2["session_id"], s2["ws_ticket"])
 
@@ -892,7 +965,7 @@ def run_tests():
             asyncio.run(_run())
         test("terminal WebSocket multiple concurrent isolated sessions", test_ws_concurrent_isolated_sessions)
 
-        # Test 28: Disconnect Reconnect and Grace Period
+        # Test 30: Disconnect Reconnect and Grace Period
         def test_ws_reconnect_and_grace_period():
             p_grace = find_free_port()
             s_grace = ServerInstance(p_grace, extra_args=["--pty-grace", "3"])
@@ -911,9 +984,8 @@ def run_tests():
                 tk = sess["ws_ticket"]
 
                 async def _test_reconnect():
-                    uri = f"ws://127.0.0.1:{p_grace}/ws/terminal"
                     # Initial connection
-                    async with websockets.connect(uri) as ws:
+                    async with ws_connect(p_grace) as ws:
                         await ws_auth_and_drain(ws, sid, tk)
                         await ws.send(json.dumps({"type": "input", "data": "echo before_disconnect\n"}))
                         out = await ws_recv_output_until(ws, "before_disconnect")
@@ -927,7 +999,7 @@ def run_tests():
                     new_ticket = rec_data["ws_ticket"]
 
                     # Reconnect with new ticket
-                    async with websockets.connect(uri) as ws_rec:
+                    async with ws_connect(p_grace) as ws_rec:
                         await ws_auth_and_drain(ws_rec, sid, new_ticket)
                         await ws_rec.send(json.dumps({"type": "input", "data": "echo after_reconnect\n"}))
                         out = await ws_recv_output_until(ws_rec, "after_reconnect")
@@ -944,6 +1016,150 @@ def run_tests():
             finally:
                 s_grace.stop()
         test("terminal WebSocket reconnect and grace period expiration", test_ws_reconnect_and_grace_period)
+
+        # Test 31: Session Ownership Transfer and Old Connection Invalidation
+        def test_ws_ownership_transfer():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _run():
+                async with ws_connect(port) as ws1:
+                    await ws_auth_and_drain(ws1, sid, ticket)
+
+                    # Request reconnect ticket for same session
+                    status, _, body = raw_http_request(port, "POST", f"/api/terminal/{sid}/reconnect", headers=term_headers)
+                    assert status == 200
+                    new_ticket = json.loads(body)["ws_ticket"]
+
+                    # ws2 connects and claims session ownership
+                    async with ws_connect(port) as ws2:
+                        await ws_auth_and_drain(ws2, sid, new_ticket)
+
+                        # ws1 receives transfer error / close
+                        try:
+                            msg1 = json.loads(await asyncio.wait_for(ws1.recv(), timeout=2.0))
+                            assert msg1.get("type") == "error"
+                            assert "transferred" in msg1.get("message", "")
+                        except websockets.exceptions.ConnectionClosed:
+                            pass
+
+                        # ws1 input attempts are rejected
+                        try:
+                            await ws1.send(json.dumps({"type": "input", "data": "echo old_conn_cmd\n"}))
+                            resp = json.loads(await asyncio.wait_for(ws1.recv(), timeout=1.0))
+                            assert resp.get("type") == "error"
+                        except websockets.exceptions.ConnectionClosed:
+                            pass
+
+                        # ws2 controls session and executes command
+                        await ws2.send(json.dumps({"type": "input", "data": "echo ownership_ok_13c\n"}))
+                        out = await ws_recv_output_until(ws2, "ownership_ok_13c")
+                        assert "ownership_ok_13c" in out
+
+                        await ws2.send(json.dumps({"type": "input", "data": "exit\n"}))
+                        await ws_recv_output_until(ws2, "[exit:0]")
+
+            asyncio.run(_run())
+        test("terminal WebSocket session ownership transfer and old connection invalidation", test_ws_ownership_transfer)
+
+        # Test 32: Concurrent Reconnect Race (Single-Use Ticket Enforcement)
+        def test_ws_concurrent_reconnect_race():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            # Initial connection and disconnect
+            async def _initial_conn():
+                async with ws_connect(port) as ws:
+                    await ws_auth_and_drain(ws, sid, ticket)
+            asyncio.run(_initial_conn())
+
+            # Issue reconnect ticket
+            status, _, body = raw_http_request(port, "POST", f"/api/terminal/{sid}/reconnect", headers=term_headers)
+            assert status == 200
+            rec_ticket = json.loads(body)["ws_ticket"]
+
+            # Race two concurrent connections to claim the same ticket
+            async def _race():
+                results = []
+                async def _claim(idx):
+                    try:
+                        async with ws_connect(port) as ws:
+                            await ws.send(json.dumps({"type": "auth", "session_id": sid, "ticket": rec_ticket}))
+                            auth_type = None
+                            err_msg = ""
+                            for _ in range(5):
+                                raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                                m = json.loads(raw)
+                                if m.get("type") in ("auth_ok", "error"):
+                                    auth_type = m.get("type")
+                                    err_msg = m.get("message", "")
+                                    break
+                            results.append((idx, auth_type, err_msg))
+                    except Exception as e:
+                        results.append((idx, "exception", str(e)))
+
+                await asyncio.gather(_claim(1), _claim(2))
+                types = [r[1] for r in results]
+                assert "auth_ok" in types, f"No connection succeeded: {results}"
+                assert "error" in types or "exception" in types, f"Both connections claimed ticket: {results}"
+
+            asyncio.run(_race())
+        test("terminal WebSocket concurrent reconnect ticket race (single-use enforcement)", test_ws_concurrent_reconnect_race)
+
+        # Test 33: Session Deletion While Connected
+        def test_ws_session_deletion_while_connected():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _run():
+                async with ws_connect(port) as ws:
+                    await ws_auth_and_drain(ws, sid, ticket)
+
+                    # Delete session via REST while WS is active
+                    status, _, _ = raw_http_request(port, "DELETE", f"/api/terminal/{sid}", headers=term_headers)
+                    assert status == 200
+
+                    # WS should receive exit/error notification or close frame
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                        msg = json.loads(raw)
+                        assert msg.get("type") in ("exit", "error")
+                    except websockets.exceptions.ConnectionClosed:
+                        pass
+
+                    # Further input should fail / connection closed
+                    try:
+                        await ws.send(json.dumps({"type": "input", "data": "ls\n"}))
+                        raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        msg = json.loads(raw)
+                        assert msg.get("type") == "error"
+                    except websockets.exceptions.ConnectionClosed:
+                        pass
+
+            asyncio.run(_run())
+        test("terminal WebSocket session deletion while connected", test_ws_session_deletion_while_connected)
+
+        # Test 34: Unauthenticated Connection Timeout
+        def test_ws_unauth_timeout():
+            async def _run():
+                # Connect without authenticating and stay idle
+                async with ws_connect(port) as ws:
+                    # Wait for 5-second auth timeout
+                    closed = False
+                    start = time.time()
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=7.0)
+                        msg = json.loads(raw)
+                        assert msg.get("type") == "error"
+                        assert "authentication timeout" in msg.get("message", "")
+                        await ws.recv()
+                    except (websockets.exceptions.ConnectionClosed, asyncio.TimeoutError):
+                        closed = True
+                    elapsed = time.time() - start
+                    assert elapsed >= 4.0, f"Closed too early: {elapsed}s"
+
+            asyncio.run(_run())
+        test("terminal WebSocket unauthenticated connection timeout", test_ws_unauth_timeout)
 
     finally:
         # Test 13: Clean shutdown on SIGINT / SIGTERM

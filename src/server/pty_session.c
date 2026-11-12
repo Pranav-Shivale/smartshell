@@ -40,7 +40,8 @@ static int              g_wakeup_pipe[2] = {-1, -1};
 /* Forward declarations */
 static void *pty_reader_thread_func(void *arg);
 static void pty_session_do_terminate_locked(pty_session_t *s);
-static void pty_ws_send_output(struct mg_connection *conn, const char *data, size_t len);
+static void pty_session_reap_child_locked(pty_session_t *s, bool send_signals);
+static int pty_ws_send_output(struct mg_connection *conn, const char *data, size_t len);
 
 const char *pty_session_status_str(pty_session_status_t status)
 {
@@ -158,6 +159,82 @@ void pty_manager_shutdown(void)
     pthread_mutex_unlock(&g_manager_lock);
 }
 
+#define MAX_PENDING_WS 32
+
+static struct {
+    pthread_mutex_t lock;
+    struct mg_connection *conns[MAX_PENDING_WS];
+    time_t connected_at[MAX_PENDING_WS];
+    int count;
+} g_pending_auth = {
+    .lock = PTHREAD_MUTEX_INITIALIZER,
+    .count = 0
+};
+
+void pty_session_add_pending_auth(struct mg_connection *conn)
+{
+    if (conn == NULL) return;
+    pthread_mutex_lock(&g_pending_auth.lock);
+    if (g_pending_auth.count < MAX_PENDING_WS) {
+        g_pending_auth.conns[g_pending_auth.count] = conn;
+        g_pending_auth.connected_at[g_pending_auth.count] = time(NULL);
+        g_pending_auth.count++;
+    }
+    pthread_mutex_unlock(&g_pending_auth.lock);
+}
+
+void pty_session_remove_pending_auth(const struct mg_connection *conn)
+{
+    if (conn == NULL) return;
+    pthread_mutex_lock(&g_pending_auth.lock);
+    for (int i = 0; i < g_pending_auth.count; i++) {
+        if (g_pending_auth.conns[i] == conn) {
+            g_pending_auth.conns[i] = g_pending_auth.conns[g_pending_auth.count - 1];
+            g_pending_auth.connected_at[i] = g_pending_auth.connected_at[g_pending_auth.count - 1];
+            g_pending_auth.count--;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pending_auth.lock);
+}
+
+void pty_session_check_auth_timeouts(void)
+{
+    time_t now = time(NULL);
+    struct mg_connection *to_close[MAX_PENDING_WS];
+    int num_to_close = 0;
+
+    pthread_mutex_lock(&g_pending_auth.lock);
+    int i = 0;
+    while (i < g_pending_auth.count) {
+        if ((now - g_pending_auth.connected_at[i]) >= WS_AUTH_TIMEOUT_SEC) {
+            to_close[num_to_close++] = g_pending_auth.conns[i];
+            g_pending_auth.conns[i] = g_pending_auth.conns[g_pending_auth.count - 1];
+            g_pending_auth.connected_at[i] = g_pending_auth.connected_at[g_pending_auth.count - 1];
+            g_pending_auth.count--;
+        } else {
+            i++;
+        }
+    }
+    pthread_mutex_unlock(&g_pending_auth.lock);
+
+    for (int j = 0; j < num_to_close; j++) {
+        cJSON *err = cJSON_CreateObject();
+        if (err != NULL) {
+            cJSON_AddStringToObject(err, "type", "error");
+            cJSON_AddStringToObject(err, "message", "authentication timeout");
+            char *json = cJSON_PrintUnformatted(err);
+            cJSON_Delete(err);
+            if (json != NULL) {
+                mg_websocket_write(to_close[j], MG_WEBSOCKET_OPCODE_TEXT, json, strlen(json));
+                free(json);
+            }
+        }
+        mg_websocket_write(to_close[j], MG_WEBSOCKET_OPCODE_CONNECTION_CLOSE, NULL, 0);
+        mg_close_connection(to_close[j]);
+    }
+}
+
 static void pty_session_append_output(pty_session_t *s, const char *data, size_t len)
 {
     if (len == 0 || data == NULL) return;
@@ -180,13 +257,13 @@ static void pty_session_append_output(pty_session_t *s, const char *data, size_t
     s->output_buf[s->output_len] = '\0';
 }
 
-static void pty_ws_send_output(struct mg_connection *conn, const char *data, size_t len)
+static int pty_ws_send_output(struct mg_connection *conn, const char *data, size_t len)
 {
-    if (conn == NULL || data == NULL || len == 0) return;
+    if (conn == NULL || data == NULL || len == 0) return 0;
 
     /* Build JSON message: {"type": "output", "data": "..."} */
     cJSON *msg = cJSON_CreateObject();
-    if (msg == NULL) return;
+    if (msg == NULL) return -1;
 
     cJSON_AddStringToObject(msg, "type", "output");
 
@@ -219,10 +296,12 @@ static void pty_ws_send_output(struct mg_connection *conn, const char *data, siz
     char *json_str = cJSON_PrintUnformatted(msg);
     cJSON_Delete(msg);
 
+    int ret = -1;
     if (json_str != NULL) {
-        mg_websocket_write(conn, MG_WEBSOCKET_OPCODE_TEXT, json_str, strlen(json_str));
+        ret = mg_websocket_write(conn, MG_WEBSOCKET_OPCODE_TEXT, json_str, strlen(json_str));
         free(json_str);
     }
+    return ret;
 }
 
 static void pty_ws_send_exit(struct mg_connection *conn, int exit_code)
@@ -244,17 +323,75 @@ static void pty_ws_send_exit(struct mg_connection *conn, int exit_code)
     }
 }
 
+/*
+ * Coordinated single-owner child process termination and reaping.
+ *
+ * Sends SIGHUP to the child process group and child PID, waits up to 50ms,
+ * and escalates to SIGKILL if the child ignores SIGHUP or remains alive.
+ * Always reaps with waitpid() and sets child_pid to -1.
+ * Must be called with s->lock held.
+ */
+static void pty_session_reap_child_locked(pty_session_t *s, bool send_signals)
+{
+    if (s->child_pid <= 0) {
+        return;
+    }
+
+    pid_t pid = s->child_pid;
+    int status = 0;
+
+    if (!send_signals) {
+        pid_t waited = waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+            if (WIFEXITED(status)) {
+                s->exit_code = WEXITSTATUS(status);
+            } else if (WIFSIGNALED(status)) {
+                s->exit_code = 128 + WTERMSIG(status);
+            }
+            s->child_pid = -1;
+            return;
+        }
+    }
+
+    /* Send SIGHUP to the child's process group and the child itself */
+    kill(-pid, SIGHUP);
+    kill(pid, SIGHUP);
+
+    /* Poll waitpid with WNOHANG for up to 50ms (5 x 10ms) */
+    bool reaped = false;
+    for (int i = 0; i < 5; i++) {
+        usleep(10000); /* 10ms */
+        pid_t waited = waitpid(pid, &status, WNOHANG);
+        if (waited == pid) {
+            reaped = true;
+            break;
+        }
+    }
+
+    if (!reaped) {
+        /* Child ignored SIGHUP or hasn't exited: escalate to SIGKILL */
+        kill(-pid, SIGKILL);
+        kill(pid, SIGKILL);
+        waitpid(pid, &status, 0);
+    }
+
+    if (WIFEXITED(status)) {
+        s->exit_code = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        s->exit_code = 128 + WTERMSIG(status);
+    }
+
+    s->child_pid = -1;
+}
+
 static void pty_session_do_terminate_locked(pty_session_t *s)
 {
     if (s->status == PTY_STATUS_TERMINATED && s->master_fd < 0 && s->child_pid <= 0) {
         return;
     }
 
-    /* Send exit notification to WebSocket client if active */
-    if (s->conn != NULL) {
-        pty_ws_send_exit(s->conn, s->exit_code);
-        s->conn = NULL;
-    }
+    /* Terminate and reap child process (SIGHUP -> SIGKILL escalation) */
+    pty_session_reap_child_locked(s, true);
 
     /* Close master FD */
     if (s->master_fd >= 0) {
@@ -262,32 +399,12 @@ static void pty_session_do_terminate_locked(pty_session_t *s)
         s->master_fd = -1;
     }
 
-    /* Terminate child process and process group */
-    if (s->child_pid > 0) {
-        /* Send SIGHUP to child process group */
-        kill(-s->child_pid, SIGHUP);
-        kill(s->child_pid, SIGHUP);
-
-        /* Wait briefly for graceful exit */
-        usleep(30000); /* 30ms */
-
-        int status = 0;
-        pid_t waited = waitpid(s->child_pid, &status, WNOHANG);
-        if (waited == 0) {
-            /* Still running: force terminate with SIGKILL */
-            kill(-s->child_pid, SIGKILL);
-            kill(s->child_pid, SIGKILL);
-            waitpid(s->child_pid, &status, 0);
-        }
-
-        if (waited > 0) {
-            if (WIFEXITED(status)) {
-                s->exit_code = WEXITSTATUS(status);
-            } else if (WIFSIGNALED(status)) {
-                s->exit_code = 128 + WTERMSIG(status);
-            }
-        }
-        s->child_pid = -1;
+    /* Send exit notification to WebSocket client if active, and close connection */
+    if (s->conn != NULL) {
+        pty_ws_send_exit(s->conn, s->exit_code);
+        mg_websocket_write(s->conn, MG_WEBSOCKET_OPCODE_CONNECTION_CLOSE, NULL, 0);
+        mg_close_connection(s->conn);
+        s->conn = NULL;
     }
 
     s->status = PTY_STATUS_TERMINATED;
@@ -504,6 +621,7 @@ bool pty_session_authenticate_ticket(const char *session_id, const char *ticket)
 
     /* Single-use: burn ticket immediately upon successful authentication */
     s->ticket_used = true;
+    explicit_bzero(s->ws_ticket, sizeof(s->ws_ticket));
     pthread_mutex_unlock(&s->lock);
     return true;
 }
@@ -554,6 +672,34 @@ void pty_session_attach_conn(pty_session_t *session, struct mg_connection *conn)
     if (session == NULL || conn == NULL) return;
 
     pthread_mutex_lock(&session->lock);
+
+    /* Transfer of ownership: cleanly invalidate and close previous connection */
+    if (session->conn != NULL && session->conn != conn) {
+        struct mg_connection *old_conn = session->conn;
+
+        /* Invalidate old connection user data so it cannot send further commands */
+        ws_conn_data_t *old_cd = (ws_conn_data_t *)mg_get_user_connection_data(old_conn);
+        if (old_cd != NULL) {
+            old_cd->authenticated = false;
+            old_cd->session_id[0] = '\0';
+        }
+
+        /* Send error and close frame to old connection */
+        cJSON *err_msg = cJSON_CreateObject();
+        if (err_msg != NULL) {
+            cJSON_AddStringToObject(err_msg, "type", "error");
+            cJSON_AddStringToObject(err_msg, "message", "session transferred to new connection");
+            char *err_str = cJSON_PrintUnformatted(err_msg);
+            cJSON_Delete(err_msg);
+            if (err_str != NULL) {
+                mg_websocket_write(old_conn, MG_WEBSOCKET_OPCODE_TEXT, err_str, strlen(err_str));
+                free(err_str);
+            }
+        }
+        mg_websocket_write(old_conn, MG_WEBSOCKET_OPCODE_CONNECTION_CLOSE, NULL, 0);
+        mg_close_connection(old_conn);
+    }
+
     session->conn = conn;
     session->status = PTY_STATUS_ACTIVE;
     session->disconnected_at = 0;
@@ -565,15 +711,17 @@ void pty_session_attach_conn(pty_session_t *session, struct mg_connection *conn)
     pthread_mutex_unlock(&session->lock);
 }
 
-void pty_session_detach_conn(pty_session_t *session)
+void pty_session_detach_conn(pty_session_t *session, struct mg_connection *conn)
 {
     if (session == NULL) return;
 
     pthread_mutex_lock(&session->lock);
-    session->conn = NULL;
-    if (session->status == PTY_STATUS_ACTIVE) {
-        session->status = PTY_STATUS_DISCONNECTED;
-        session->disconnected_at = time(NULL);
+    if (conn == NULL || session->conn == conn) {
+        session->conn = NULL;
+        if (session->status == PTY_STATUS_ACTIVE) {
+            session->status = PTY_STATUS_DISCONNECTED;
+            session->disconnected_at = time(NULL);
+        }
     }
     pthread_mutex_unlock(&session->lock);
 }
@@ -728,8 +876,8 @@ static void *pty_reader_thread_func(void *arg)
         }
         pthread_mutex_unlock(&g_manager_lock);
 
-        /* Poll with 1000ms timeout for periodic grace period checks */
-        int ret = poll(pfds, nfds, 1000);
+        /* Poll with 500ms timeout for periodic grace period and auth timeout checks */
+        int ret = poll(pfds, nfds, 500);
         if (ret < 0) {
             if (errno == EINTR) continue;
             break;
@@ -738,6 +886,9 @@ static void *pty_reader_thread_func(void *arg)
         if (!g_reader_running) {
             break;
         }
+
+        /* Check for unauthenticated WebSocket connection timeouts */
+        pty_session_check_auth_timeouts();
 
         /* Drain wakeup pipe if signaled */
         if (pfds[0].revents & POLLIN) {
@@ -760,22 +911,19 @@ static void *pty_reader_thread_func(void *arg)
                         pty_session_append_output(s, chunk, (size_t)n);
 
                         if (s->conn != NULL && s->status == PTY_STATUS_ACTIVE) {
-                            pty_ws_send_output(s->conn, chunk, (size_t)n);
+                            int wres = pty_ws_send_output(s->conn, chunk, (size_t)n);
+                            if (wres <= 0) {
+                                /* Write failed: client disconnected or socket broken */
+                                s->conn = NULL;
+                                s->status = PTY_STATUS_DISCONNECTED;
+                                s->disconnected_at = time(NULL);
+                            }
                         }
                     } else if (n <= 0) {
                         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
                             /* Non-blocking read had no data */
                         } else {
                             /* Child closed terminal or exited (EIO on Linux) */
-                            int status = 0;
-                            if (s->child_pid > 0) {
-                                waitpid(s->child_pid, &status, WNOHANG);
-                                if (WIFEXITED(status)) {
-                                    s->exit_code = WEXITSTATUS(status);
-                                } else if (WIFSIGNALED(status)) {
-                                    s->exit_code = 128 + WTERMSIG(status);
-                                }
-                            }
                             pty_session_do_terminate_locked(s);
                         }
                     }

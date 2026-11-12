@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <errno.h>
 
 static void test_pty_session_create_and_find(void)
 {
@@ -178,6 +180,53 @@ static void test_pty_session_max_limit(void)
     pty_manager_shutdown();
 }
 
+static void test_pty_ticket_expiry(void)
+{
+    ASSERT_EQ_INT(0, pty_manager_init("bin/smartshell", 30));
+
+    pty_session_t *s = pty_session_create(80, 24);
+    ASSERT_TRUE(s != NULL);
+
+    char ticket_copy[PTY_TICKET_HEX_LEN + 1];
+    strcpy(ticket_copy, s->ws_ticket);
+
+    /* Artificially expire the ticket */
+    s->ticket_expires_at = time(NULL) - 10;
+
+    /* Authentication with expired ticket should fail */
+    ASSERT_FALSE(pty_session_authenticate_ticket(s->session_id, ticket_copy));
+
+    ASSERT_EQ_INT(0, pty_session_delete(s->session_id));
+    pty_manager_shutdown();
+}
+
+static void test_pty_child_sighup_and_sigkill_escalation(void)
+{
+    ASSERT_EQ_INT(0, pty_manager_init("bin/smartshell", 30));
+
+    pty_session_t *s = pty_session_create(80, 24);
+    ASSERT_TRUE(s != NULL);
+    pid_t child_pid = s->child_pid;
+    ASSERT_TRUE(child_pid > 0);
+
+    /* Command shell to ignore SIGHUP and sleep */
+    const char *cmd = "trap '' HUP; sleep 60\n";
+    pty_session_write_input(s, cmd, strlen(cmd));
+    usleep(150000); /* 150ms to ensure trap and sleep execute */
+
+    /* Terminate session: coordinator must escalate to SIGKILL and reap child */
+    ASSERT_EQ_INT(0, pty_session_terminate(s));
+    ASSERT_EQ_INT(PTY_STATUS_TERMINATED, (int)s->status);
+    ASSERT_EQ_INT(-1, s->child_pid);
+
+    /* Verify child process no longer exists (no zombie, fully reaped) */
+    int res = kill(child_pid, 0);
+    ASSERT_TRUE(res == -1 && errno == ESRCH);
+
+    ASSERT_EQ_INT(0, pty_session_delete(s->session_id));
+    pty_manager_shutdown();
+}
+
 int main(void)
 {
     TEST_INIT();
@@ -185,8 +234,10 @@ int main(void)
 
     RUN_TEST(test_pty_session_create_and_find);
     RUN_TEST(test_pty_ticket_authentication);
+    RUN_TEST(test_pty_ticket_expiry);
     RUN_TEST(test_pty_session_resize);
     RUN_TEST(test_pty_session_input_and_output);
+    RUN_TEST(test_pty_child_sighup_and_sigkill_escalation);
     RUN_TEST(test_pty_session_status_and_list);
     RUN_TEST(test_pty_session_max_limit);
 
