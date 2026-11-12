@@ -103,5 +103,26 @@ bool json_parse_scheduler_compare(const char *json_str,
  */
 char *json_serialize_sched_compare(const sched_compare_result_t *cmp);
 
+#include "server/pty_session.h"
+
+/*
+ * Serialize a single PTY terminal session into a newly allocated JSON string.
+ * Caller must free() the returned string. Returns NULL on failure.
+ */
+char *json_serialize_terminal_session(const pty_session_t *session);
+
+/*
+ * Serialize a list of PTY terminal sessions into a newly allocated JSON string.
+ * Caller must free() the returned string. Returns NULL on failure.
+ */
+char *json_serialize_terminal_session_list(const pty_session_t *sessions, int count);
+
+/*
+ * Parse optional cols and rows from terminal session creation request body.
+ * If body is empty or NULL, defaults to 80x24.
+ * Returns true on success, false if JSON is malformed.
+ */
+bool json_parse_terminal_create(const char *json_str, unsigned short *cols, unsigned short *rows);
+
 #endif /* SMARTSHELL_SERVER_JSON_API_H */
 

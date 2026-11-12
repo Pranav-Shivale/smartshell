@@ -60,8 +60,8 @@ CJSON_OBJ     = $(BUILDDIR)/third_party/cJSON.o
 SERVER_ALL_OBJS = $(SERVER_OBJS) $(CORE_OBJS) $(CIVETWEB_OBJ) $(CJSON_OBJ)
 SERVER_DEPS     = $(SERVER_OBJS:.o=.d)
 
-# Server needs pthreads (CivetWeb uses threads) and dl (dynamic loading)
-SERVER_LDFLAGS  = $(LDFLAGS) -lpthread -ldl
+# Server needs pthreads (CivetWeb uses threads) and dl (dynamic loading), util for openpty
+SERVER_LDFLAGS  = $(LDFLAGS) -lpthread -ldl -lutil
 
 # Server-specific includes add third-party headers
 SERVER_CFLAGS   = $(CFLAGS) -D_DEFAULT_SOURCE -I$(THIRDPARTYDIR)/civetweb -I$(THIRDPARTYDIR)/cjson
@@ -88,8 +88,11 @@ $(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
 $(BUILDDIR)/$(TESTDIR)/test_server_auth: $(TESTDIR)/test_server_auth.c $(CORE_OBJS) $(BUILDDIR)/server/auth.o | $(BUILDDIR)/$(TESTDIR)
 	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -I$(TESTDIR) -MMD -MP -o $@ $< $(CORE_OBJS) $(BUILDDIR)/server/auth.o $(LDFLAGS)
 
-$(BUILDDIR)/$(TESTDIR)/test_server_json: $(TESTDIR)/test_server_json.c $(CORE_OBJS) $(BUILDDIR)/server/json_api.o $(CJSON_OBJ) | $(BUILDDIR)/$(TESTDIR)
-	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -I$(TESTDIR) -I$(THIRDPARTYDIR)/cjson -MMD -MP -o $@ $< $(CORE_OBJS) $(BUILDDIR)/server/json_api.o $(CJSON_OBJ) $(LDFLAGS)
+$(BUILDDIR)/$(TESTDIR)/test_server_json: $(TESTDIR)/test_server_json.c $(CORE_OBJS) $(BUILDDIR)/server/json_api.o $(BUILDDIR)/server/pty_session.o $(BUILDDIR)/server/auth.o $(CJSON_OBJ) $(CIVETWEB_OBJ) | $(BUILDDIR)/$(TESTDIR)
+	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -I$(TESTDIR) -I$(THIRDPARTYDIR)/cjson -I$(THIRDPARTYDIR)/civetweb -MMD -MP -o $@ $< $(CORE_OBJS) $(BUILDDIR)/server/json_api.o $(BUILDDIR)/server/pty_session.o $(BUILDDIR)/server/auth.o $(CJSON_OBJ) $(CIVETWEB_OBJ) $(LDFLAGS) -lpthread -ldl -lutil
+
+$(BUILDDIR)/$(TESTDIR)/test_server_pty: $(TESTDIR)/test_server_pty.c $(CORE_OBJS) $(BUILDDIR)/server/pty_session.o $(BUILDDIR)/server/auth.o $(CJSON_OBJ) $(CIVETWEB_OBJ) | $(BUILDDIR)/$(TESTDIR)
+	$(CC) $(CFLAGS) -D_DEFAULT_SOURCE -I$(TESTDIR) -I$(THIRDPARTYDIR)/cjson -I$(THIRDPARTYDIR)/civetweb -MMD -MP -o $@ $< $(CORE_OBJS) $(BUILDDIR)/server/pty_session.o $(BUILDDIR)/server/auth.o $(CJSON_OBJ) $(CIVETWEB_OBJ) $(LDFLAGS) -lpthread -ldl -lutil
 
 $(BUILDDIR)/$(TESTDIR)/%: $(TESTDIR)/%.c $(CORE_OBJS) | $(BUILDDIR)/$(TESTDIR)
 	$(CC) $(CFLAGS) -I$(TESTDIR) -MMD -MP -o $@ $< $(CORE_OBJS) $(LDFLAGS)
@@ -125,7 +128,7 @@ $(BUILDDIR)/server/%.o: $(SRVDIR)/%.c | $(BUILDDIR)/server
 
 # Compile third-party sources with relaxed warnings (no -Werror -pedantic)
 $(CIVETWEB_OBJ): $(THIRDPARTYDIR)/civetweb/civetweb.c | $(BUILDDIR)/third_party
-	$(CC) -std=c11 -Wall -Wextra -O2 $(filter -fsanitize=%,$(CFLAGS)) -I$(THIRDPARTYDIR)/civetweb -D_POSIX_C_SOURCE=200809L -DUSE_IPV6=0 -DNDEBUG -DNO_SSL -DNO_CGI -c -o $@ $<
+	$(CC) -std=c11 -Wall -Wextra -O2 $(filter -fsanitize=%,$(CFLAGS)) -I$(THIRDPARTYDIR)/civetweb -D_POSIX_C_SOURCE=200809L -DUSE_IPV6=0 -DUSE_WEBSOCKET -DNDEBUG -DNO_SSL -DNO_CGI -c -o $@ $<
 
 $(CJSON_OBJ): $(THIRDPARTYDIR)/cjson/cJSON.c | $(BUILDDIR)/third_party
 	$(CC) -std=c11 -Wall -Wextra -O2 $(filter -fsanitize=%,$(CFLAGS)) -I$(THIRDPARTYDIR)/cjson -c -o $@ $<
@@ -169,7 +172,7 @@ test-asan: clean test
 test-integration: $(TARGET)
 	@$(TESTDIR)/integration/run_tests.sh
 
-test-server: $(TARGET_SERVER)
+test-server: $(TARGET) $(TARGET_SERVER)
 	@python3 $(TESTDIR)/test_server.py
 
 test-server-asan: CFLAGS  += -fsanitize=address,undefined -g -O1 -fno-omit-frame-pointer

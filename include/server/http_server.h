@@ -24,6 +24,8 @@ typedef struct {
     const char *document_root;      /* Static file root (for frontend) */
     const char *auth_token;         /* Required Bearer token */
     bool        allow_root;         /* Allow running as root (danger) */
+    const char *shell_path;         /* Path to shell binary (default: bin/smartshell) */
+    int         pty_grace_period_sec; /* Reconnect grace period in seconds */
 } server_config_t;
 
 /*

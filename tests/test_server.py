@@ -26,6 +26,8 @@ import stat
 import subprocess
 import sys
 import time
+import asyncio
+import websockets
 
 SERVER_BIN = "./bin/smartshell-server"
 DEFAULT_TEST_PORT = 18080
@@ -583,6 +585,365 @@ def run_tests():
             status, _, _ = raw_http_request(port, "POST", "/api/scheduler/compare", headers={"Host": f"127.0.0.1:{port}"}, body=valid_payload)
             assert status == 401, f"Expected 401, got {status}"
         test("scheduler compare endpoint (/api/scheduler/compare)", test_scheduler_compare)
+
+        # ---- Phase 13C: PTY Session & WebSocket Terminal Bridge Tests --------
+
+        # Test 20: Terminal Session REST CRUD (/api/terminal)
+        def test_terminal_rest():
+            term_headers = {
+                "Host": f"127.0.0.1:{port}",
+                "Authorization": f"Bearer {server.token}",
+                "Content-Type": "application/json"
+            }
+            # Create session
+            status, _, body = raw_http_request(port, "POST", "/api/terminal", headers=term_headers,
+                                               body=json.dumps({"cols": 100, "rows": 30}))
+            assert status == 201, f"Expected 201, got {status}: {body}"
+            data = json.loads(body)
+            assert "session_id" in data
+            assert "ws_ticket" in data
+            assert data.get("cols") == 100
+            assert data.get("rows") == 30
+            assert data.get("status") == "created"
+            sid = data["session_id"]
+
+            # List sessions
+            status, _, body = raw_http_request(port, "GET", "/api/terminal", headers=term_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+            list_data = json.loads(body)
+            assert "sessions" in list_data
+            assert any(s["session_id"] == sid for s in list_data["sessions"])
+
+            # Resize session via REST
+            status, _, _ = raw_http_request(port, "POST", f"/api/terminal/{sid}/resize", headers=term_headers,
+                                            body=json.dumps({"cols": 120, "rows": 40}))
+            assert status == 200, f"Expected 200, got {status}"
+
+            # Invalid resize parameters
+            status, _, _ = raw_http_request(port, "POST", f"/api/terminal/{sid}/resize", headers=term_headers,
+                                            body=json.dumps({"cols": -1, "rows": 40}))
+            assert status == 400, f"Expected 400 for negative cols, got {status}"
+
+            # Delete session
+            status, _, body = raw_http_request(port, "DELETE", f"/api/terminal/{sid}", headers=term_headers)
+            assert status == 200, f"Expected 200, got {status}: {body}"
+
+            # Delete already deleted session
+            status, _, _ = raw_http_request(port, "DELETE", f"/api/terminal/{sid}", headers=term_headers)
+            assert status == 404, f"Expected 404 for deleted session, got {status}"
+        test("terminal session REST CRUD (/api/terminal)", test_terminal_rest)
+
+        # Helper: Create session via REST
+        def create_test_session(cols=80, rows=24):
+            term_headers = {
+                "Host": f"127.0.0.1:{port}",
+                "Authorization": f"Bearer {server.token}",
+                "Content-Type": "application/json"
+            }
+            status, _, body = raw_http_request(port, "POST", "/api/terminal", headers=term_headers,
+                                               body=json.dumps({"cols": cols, "rows": rows}))
+            assert status == 201, f"Failed to create session: {status}"
+            return json.loads(body)
+
+        async def ws_auth_and_drain(ws, sid, ticket):
+            await ws.send(json.dumps({"type": "auth", "session_id": sid, "ticket": ticket}))
+            await asyncio.sleep(0.05)
+            while True:
+                try:
+                    await asyncio.wait_for(ws.recv(), timeout=0.15)
+                except asyncio.TimeoutError:
+                    break
+
+        async def ws_recv_output_until(ws, target, timeout=3.0):
+            deadline = time.time() + timeout
+            collected = ""
+            while time.time() < deadline:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=max(0.1, deadline - time.time()))
+                    msg = json.loads(raw)
+                    if msg.get("type") == "output":
+                        collected += msg.get("data", "")
+                        if target in collected:
+                            return collected
+                    elif msg.get("type") == "exit":
+                        collected += f"[exit:{msg.get('code')}]"
+                        if target in collected:
+                            return collected
+                except asyncio.TimeoutError:
+                    break
+            return collected
+
+        # Test 21: WebSocket Basic Execution & Exit
+        def test_ws_basic_execution():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _run():
+                uri = f"ws://127.0.0.1:{port}/ws/terminal"
+                async with websockets.connect(uri) as ws:
+                    await ws_auth_and_drain(ws, sid, ticket)
+                    await ws.send(json.dumps({"type": "input", "data": "echo phase13c_basic_ok\n"}))
+                    out = await ws_recv_output_until(ws, "phase13c_basic_ok")
+                    assert "phase13c_basic_ok" in out, f"Expected output marker, got: {out}"
+
+                    # Exit shell
+                    await ws.send(json.dumps({"type": "input", "data": "exit\n"}))
+                    out = await ws_recv_output_until(ws, "[exit:0]")
+                    assert "[exit:0]" in out, f"Expected exit code 0, got: {out}"
+
+            asyncio.run(_run())
+        test("terminal WebSocket basic execution and exit", test_ws_basic_execution)
+
+        # Test 22: WebSocket Pipelines and Redirection
+        def test_ws_pipelines_and_redirection():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _run():
+                uri = f"ws://127.0.0.1:{port}/ws/terminal"
+                async with websockets.connect(uri) as ws:
+                    await ws_auth_and_drain(ws, sid, ticket)
+                    # Pipeline test
+                    await ws.send(json.dumps({"type": "input", "data": "echo 'hello pipeline' | tr a-z A-Z\n"}))
+                    out = await ws_recv_output_until(ws, "HELLO PIPELINE")
+                    assert "HELLO PIPELINE" in out, f"Expected uppercase pipeline output, got: {out}"
+
+                    # Redirection test
+                    test_file = f"/tmp/smartshell_ws_test_{os.getpid()}.txt"
+                    await ws.send(json.dumps({"type": "input", "data": f"echo redirect_test_13c > {test_file}\n"}))
+                    await asyncio.sleep(0.1)
+                    await ws.send(json.dumps({"type": "input", "data": f"cat {test_file}\n"}))
+                    out = await ws_recv_output_until(ws, "redirect_test_13c")
+                    assert "redirect_test_13c" in out, f"Expected file redirection output, got: {out}"
+
+                    if os.path.exists(test_file):
+                        os.unlink(test_file)
+
+                    await ws.send(json.dumps({"type": "input", "data": "exit\n"}))
+                    await ws_recv_output_until(ws, "[exit:0]")
+
+            asyncio.run(_run())
+        test("terminal WebSocket pipelines and redirection", test_ws_pipelines_and_redirection)
+
+        # Test 23: WebSocket Ctrl+C and Ctrl+Z Job Control
+        def test_ws_job_control():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _run():
+                uri = f"ws://127.0.0.1:{port}/ws/terminal"
+                async with websockets.connect(uri) as ws:
+                    await ws_auth_and_drain(ws, sid, ticket)
+
+                    # Ctrl+C test: start sleep, interrupt with \x03
+                    await ws.send(json.dumps({"type": "input", "data": "sleep 10\n"}))
+                    await asyncio.sleep(0.15)
+                    await ws.send(json.dumps({"type": "input", "data": "\x03"}))
+                    out = await ws_recv_output_until(ws, "smartshell>")
+                    assert "smartshell>" in out or "^C" in out, f"Expected Ctrl-C prompt return, got: {out}"
+
+                    # Ctrl+Z test: start sleep, stop with \x1a
+                    await ws.send(json.dumps({"type": "input", "data": "sleep 10\n"}))
+                    await asyncio.sleep(0.15)
+                    await ws.send(json.dumps({"type": "input", "data": "\x1a"}))
+                    out = await ws_recv_output_until(ws, "Stopped")
+                    assert "Stopped" in out, f"Expected Stopped job notification, got: {out}"
+
+                    # Kill the stopped background job
+                    await ws.send(json.dumps({"type": "input", "data": "kill %1\n"}))
+                    await asyncio.sleep(0.1)
+
+                    await ws.send(json.dumps({"type": "input", "data": "exit\n"}))
+                    await ws_recv_output_until(ws, "[exit:0]")
+
+            asyncio.run(_run())
+        test("terminal WebSocket Ctrl+C and Ctrl+Z job control", test_ws_job_control)
+
+        # Test 24: WebSocket Window Resize and Ping/Pong
+        def test_ws_resize_and_ping():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _run():
+                uri = f"ws://127.0.0.1:{port}/ws/terminal"
+                async with websockets.connect(uri) as ws:
+                    await ws_auth_and_drain(ws, sid, ticket)
+
+                    # Resize command
+                    await ws.send(json.dumps({"type": "resize", "cols": 132, "rows": 43}))
+                    await asyncio.sleep(0.05)
+
+                    # Ping command
+                    await ws.send(json.dumps({"type": "ping"}))
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+                    assert msg.get("type") == "pong", f"Expected pong, got: {msg}"
+
+                    await ws.send(json.dumps({"type": "input", "data": "exit\n"}))
+                    await ws_recv_output_until(ws, "[exit:0]")
+
+            asyncio.run(_run())
+        test("terminal WebSocket resize propagation and ping/pong", test_ws_resize_and_ping)
+
+        # Test 25: WebSocket Authentication and Security
+        def test_ws_auth_and_security():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _test_wrong_ticket():
+                uri = f"ws://127.0.0.1:{port}/ws/terminal"
+                async with websockets.connect(uri) as ws:
+                    await ws.send(json.dumps({"type": "auth", "session_id": sid, "ticket": "wrong_ticket_hex"}))
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+                    assert msg.get("type") == "error"
+                    assert "authentication failed" in msg.get("message", "")
+
+            async def _test_input_before_auth():
+                uri = f"ws://127.0.0.1:{port}/ws/terminal"
+                async with websockets.connect(uri) as ws:
+                    await ws.send(json.dumps({"type": "input", "data": "ls\n"}))
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+                    assert msg.get("type") == "error"
+                    assert "authentication required" in msg.get("message", "")
+
+            async def _test_valid_auth_then_replay():
+                uri = f"ws://127.0.0.1:{port}/ws/terminal"
+                async with websockets.connect(uri) as ws:
+                    await ws.send(json.dumps({"type": "auth", "session_id": sid, "ticket": ticket}))
+                    auth_resp = None
+                    for _ in range(3):
+                        m = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+                        if m.get("type") == "auth_ok":
+                            auth_resp = m
+                            break
+                    assert auth_resp is not None
+
+                # Attempt replay with same ticket on new connection
+                async with websockets.connect(uri) as ws2:
+                    await ws2.send(json.dumps({"type": "auth", "session_id": sid, "ticket": ticket}))
+                    msg = json.loads(await asyncio.wait_for(ws2.recv(), timeout=2.0))
+                    assert msg.get("type") == "error"
+                    assert "authentication failed" in msg.get("message", "")
+
+            asyncio.run(_test_wrong_ticket())
+            asyncio.run(_test_input_before_auth())
+            asyncio.run(_test_valid_auth_then_replay())
+        test("terminal WebSocket authentication and security enforcement", test_ws_auth_and_security)
+
+        # Test 26: WebSocket Malformed and Oversized Messages
+        def test_ws_message_validation():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _run():
+                uri = f"ws://127.0.0.1:{port}/ws/terminal"
+                async with websockets.connect(uri) as ws:
+                    # Non-JSON garbage
+                    await ws.send("not_valid_json_payload{{{")
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+                    assert msg.get("type") == "error"
+                    assert "invalid JSON" in msg.get("message", "")
+
+                    # Missing type field
+                    await ws.send(json.dumps({"missing_type": True}))
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+                    assert msg.get("type") == "error"
+                    assert "missing or invalid type" in msg.get("message", "")
+
+                    # Oversized message (>64KB)
+                    oversized = json.dumps({"type": "input", "data": "x" * 70000})
+                    await ws.send(oversized)
+                    msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=2.0))
+                    assert msg.get("type") == "error"
+                    assert "message too large" in msg.get("message", "")
+
+            asyncio.run(_run())
+        test("terminal WebSocket malformed and oversized message rejection", test_ws_message_validation)
+
+        # Test 27: Multiple Concurrent Isolated Sessions
+        def test_ws_concurrent_isolated_sessions():
+            s1 = create_test_session()
+            s2 = create_test_session()
+
+            async def _run():
+                uri = f"ws://127.0.0.1:{port}/ws/terminal"
+                async with websockets.connect(uri) as ws1, websockets.connect(uri) as ws2:
+                    await ws_auth_and_drain(ws1, s1["session_id"], s1["ws_ticket"])
+                    await ws_auth_and_drain(ws2, s2["session_id"], s2["ws_ticket"])
+
+                    # Send unique token to session 1
+                    await ws1.send(json.dumps({"type": "input", "data": "echo UNIQUE_TOKEN_AAA\n"}))
+                    # Send unique token to session 2
+                    await ws2.send(json.dumps({"type": "input", "data": "echo UNIQUE_TOKEN_BBB\n"}))
+
+                    out1 = await ws_recv_output_until(ws1, "UNIQUE_TOKEN_AAA")
+                    out2 = await ws_recv_output_until(ws2, "UNIQUE_TOKEN_BBB")
+
+                    assert "UNIQUE_TOKEN_AAA" in out1
+                    assert "UNIQUE_TOKEN_BBB" not in out1, "Session leak detected: token B appeared in session A!"
+
+                    assert "UNIQUE_TOKEN_BBB" in out2
+                    assert "UNIQUE_TOKEN_AAA" not in out2, "Session leak detected: token A appeared in session B!"
+
+                    await ws1.send(json.dumps({"type": "input", "data": "exit\n"}))
+                    await ws2.send(json.dumps({"type": "input", "data": "exit\n"}))
+                    await ws_recv_output_until(ws1, "[exit:0]")
+                    await ws_recv_output_until(ws2, "[exit:0]")
+
+            asyncio.run(_run())
+        test("terminal WebSocket multiple concurrent isolated sessions", test_ws_concurrent_isolated_sessions)
+
+        # Test 28: Disconnect Reconnect and Grace Period
+        def test_ws_reconnect_and_grace_period():
+            p_grace = find_free_port()
+            s_grace = ServerInstance(p_grace, extra_args=["--pty-grace", "3"])
+            s_grace.start()
+
+            try:
+                g_headers = {
+                    "Host": f"127.0.0.1:{p_grace}",
+                    "Authorization": f"Bearer {s_grace.token}",
+                    "Content-Type": "application/json"
+                }
+                status, _, body = raw_http_request(p_grace, "POST", "/api/terminal", headers=g_headers, body=b"{}")
+                assert status == 201
+                sess = json.loads(body)
+                sid = sess["session_id"]
+                tk = sess["ws_ticket"]
+
+                async def _test_reconnect():
+                    uri = f"ws://127.0.0.1:{p_grace}/ws/terminal"
+                    # Initial connection
+                    async with websockets.connect(uri) as ws:
+                        await ws_auth_and_drain(ws, sid, tk)
+                        await ws.send(json.dumps({"type": "input", "data": "echo before_disconnect\n"}))
+                        out = await ws_recv_output_until(ws, "before_disconnect")
+                        assert "before_disconnect" in out
+                        # Disconnect abruptly
+
+                    # Request reconnect ticket
+                    status, _, body = raw_http_request(p_grace, "POST", f"/api/terminal/{sid}/reconnect", headers=g_headers)
+                    assert status == 200, f"Expected 200 on reconnect ticket request, got {status}: {body}"
+                    rec_data = json.loads(body)
+                    new_ticket = rec_data["ws_ticket"]
+
+                    # Reconnect with new ticket
+                    async with websockets.connect(uri) as ws_rec:
+                        await ws_auth_and_drain(ws_rec, sid, new_ticket)
+                        await ws_rec.send(json.dumps({"type": "input", "data": "echo after_reconnect\n"}))
+                        out = await ws_recv_output_until(ws_rec, "after_reconnect")
+                        assert "after_reconnect" in out
+
+                    # Now disconnect and wait past grace period (4s > 3s)
+                    await asyncio.sleep(4.0)
+
+                    # Reconnect should now fail because grace period expired and session was terminated
+                    status, _, _ = raw_http_request(p_grace, "POST", f"/api/terminal/{sid}/reconnect", headers=g_headers)
+                    assert status in (404, 410), f"Expected 404/410 for expired session, got {status}"
+
+                asyncio.run(_test_reconnect())
+            finally:
+                s_grace.stop()
+        test("terminal WebSocket reconnect and grace period expiration", test_ws_reconnect_and_grace_period)
 
     finally:
         # Test 13: Clean shutdown on SIGINT / SIGTERM

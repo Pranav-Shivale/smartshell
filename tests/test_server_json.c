@@ -423,6 +423,75 @@ static void test_scheduler_compare_parsing_and_serialization(void)
     sched_compare_result_free(&cmp);
 }
 
+static void test_terminal_session_serialization(void)
+{
+    pty_session_t session;
+    memset(&session, 0, sizeof(session));
+    strcpy(session.session_id, "1234567890abcdef1234567890abcdef");
+    strcpy(session.ws_ticket, "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+    session.ticket_expires_at = time(NULL) + 30;
+    session.child_pid = 54321;
+    session.cols = 120;
+    session.rows = 40;
+    session.created_at = 1700000000;
+    session.status = PTY_STATUS_ACTIVE;
+
+    char *json = json_serialize_terminal_session(&session);
+    ASSERT_TRUE(json != NULL);
+
+    cJSON *root = cJSON_Parse(json);
+    ASSERT_TRUE(root != NULL);
+    ASSERT_EQ_STR("1234567890abcdef1234567890abcdef", cJSON_GetObjectItem(root, "session_id")->valuestring);
+    ASSERT_EQ_INT(54321, cJSON_GetObjectItem(root, "pid")->valueint);
+    ASSERT_EQ_STR("active", cJSON_GetObjectItem(root, "status")->valuestring);
+    ASSERT_EQ_INT(120, cJSON_GetObjectItem(root, "cols")->valueint);
+    ASSERT_EQ_INT(40, cJSON_GetObjectItem(root, "rows")->valueint);
+
+    cJSON_Delete(root);
+    free(json);
+
+    /* Test session list serialization */
+    pty_session_t list[1];
+    list[0] = session;
+    char *list_json = json_serialize_terminal_session_list(list, 1);
+    ASSERT_TRUE(list_json != NULL);
+
+    cJSON *lroot = cJSON_Parse(list_json);
+    ASSERT_TRUE(lroot != NULL);
+    ASSERT_EQ_INT(1, cJSON_GetObjectItem(lroot, "count")->valueint);
+    cJSON *arr = cJSON_GetObjectItem(lroot, "sessions");
+    ASSERT_TRUE(arr != NULL && cJSON_IsArray(arr));
+    ASSERT_EQ_INT(1, cJSON_GetArraySize(arr));
+
+    cJSON_Delete(lroot);
+    free(list_json);
+}
+
+static void test_terminal_create_parsing(void)
+{
+    unsigned short cols, rows;
+
+    /* Default when null or empty */
+    ASSERT_TRUE(json_parse_terminal_create(NULL, &cols, &rows));
+    ASSERT_EQ_INT(80, (int)cols);
+    ASSERT_EQ_INT(24, (int)rows);
+
+    ASSERT_TRUE(json_parse_terminal_create("", &cols, &rows));
+    ASSERT_EQ_INT(80, (int)cols);
+    ASSERT_EQ_INT(24, (int)rows);
+
+    /* Explicit valid values */
+    ASSERT_TRUE(json_parse_terminal_create("{\"cols\": 100, \"rows\": 30}", &cols, &rows));
+    ASSERT_EQ_INT(100, (int)cols);
+    ASSERT_EQ_INT(30, (int)rows);
+
+    /* Invalid values */
+    ASSERT_FALSE(json_parse_terminal_create("not valid json", &cols, &rows));
+    ASSERT_FALSE(json_parse_terminal_create("{\"cols\": -5, \"rows\": 30}", &cols, &rows));
+    ASSERT_FALSE(json_parse_terminal_create("{\"cols\": 100, \"rows\": 0}", &cols, &rows));
+    ASSERT_FALSE(json_parse_terminal_create("{\"cols\": 1000, \"rows\": 30}", &cols, &rows));
+}
+
 int main(void)
 {
     TEST_INIT();
@@ -436,6 +505,8 @@ int main(void)
     RUN_TEST(test_scheduler_simulate_parsing);
     RUN_TEST(test_scheduler_simulation_and_serialization);
     RUN_TEST(test_scheduler_compare_parsing_and_serialization);
+    RUN_TEST(test_terminal_session_serialization);
+    RUN_TEST(test_terminal_create_parsing);
 
     TEST_REPORT();
 }

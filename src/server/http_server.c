@@ -12,6 +12,7 @@
 #include "server/http_server.h"
 #include "server/auth.h"
 #include "server/json_api.h"
+#include "server/pty_session.h"
 #include "proc_monitor.h"
 #include "scheduler.h"
 #include "utils.h"
@@ -31,6 +32,14 @@
 static struct mg_context *g_ctx = NULL;
 static volatile sig_atomic_t g_stop_requested = 0;
 static server_config_t g_config;
+
+/*
+ * Per-WebSocket-connection state for terminal sessions.
+ */
+typedef struct {
+    char session_id[PTY_SESSION_ID_HEX_LEN + 1];
+    bool authenticated;
+} ws_conn_data_t;
 
 /* ---- Utility Helpers --------------------------------------------------- */
 
@@ -700,6 +709,526 @@ static int handle_scheduler_compare(struct mg_connection *conn, void *cbdata)
     return 200;
 }
 
+/* ---- WebSocket Terminal Handlers --------------------------------------- */
+
+/*
+ * Send a JSON text frame to a WebSocket client.
+ */
+static void ws_send_json(struct mg_connection *conn, cJSON *msg)
+{
+    if (conn == NULL || msg == NULL) return;
+    char *str = cJSON_PrintUnformatted(msg);
+    if (str != NULL) {
+        mg_websocket_write(conn, MG_WEBSOCKET_OPCODE_TEXT, str, strlen(str));
+        free(str);
+    }
+}
+
+static void ws_send_error(struct mg_connection *conn, const char *message)
+{
+    cJSON *msg = cJSON_CreateObject();
+    if (msg == NULL) return;
+    cJSON_AddStringToObject(msg, "type", "error");
+    cJSON_AddStringToObject(msg, "message", message);
+    ws_send_json(conn, msg);
+    cJSON_Delete(msg);
+}
+
+/*
+ * WebSocket connect handler — called before the handshake.
+ * Validates Host and Origin headers. Returns 0 to accept, 1 to reject.
+ */
+static int ws_terminal_connect(const struct mg_connection *conn, void *cbdata)
+{
+    (void)cbdata;
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    if (ri == NULL) return 1;
+
+    /* Validate Host header */
+    const char *host = mg_get_header(conn, "Host");
+    if (!auth_validate_host(host, g_config.port)) {
+        return 1;
+    }
+
+    /* Validate Origin header */
+    const char *origin = mg_get_header(conn, "Origin");
+    if (!auth_validate_origin(origin, g_config.port)) {
+        return 1;
+    }
+
+    /* If query string parameters are provided, validate ticket during handshake */
+    if (ri->query_string != NULL && ri->query_string[0] != '\0') {
+        char sid[64] = {0};
+        char tk[128] = {0};
+        int s_len = mg_get_var(ri->query_string, strlen(ri->query_string), "session_id", sid, sizeof(sid));
+        int t_len = mg_get_var(ri->query_string, strlen(ri->query_string), "ticket", tk, sizeof(tk));
+        if (s_len > 0 || t_len > 0) {
+            if (s_len <= 0 || t_len <= 0 || !pty_session_authenticate_ticket(sid, tk)) {
+                return 1; /* Reject handshake with 403 Forbidden */
+            }
+        }
+    }
+
+    return 0; /* Accept connection */
+}
+
+/*
+ * WebSocket ready handler — called after successful handshake.
+ * Allocates per-connection state.
+ */
+static void ws_terminal_ready(struct mg_connection *conn, void *cbdata)
+{
+    (void)cbdata;
+    ws_conn_data_t *cd = calloc(1, sizeof(ws_conn_data_t));
+    if (cd == NULL) {
+        /* Can't allocate state — close connection immediately */
+        return;
+    }
+    cd->authenticated = false;
+    cd->session_id[0] = '\0';
+
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    if (ri != NULL && ri->query_string != NULL && ri->query_string[0] != '\0') {
+        char sid[64] = {0};
+        int s_len = mg_get_var(ri->query_string, strlen(ri->query_string), "session_id", sid, sizeof(sid));
+        if (s_len > 0) {
+            strncpy(cd->session_id, sid, PTY_SESSION_ID_HEX_LEN);
+            cd->session_id[PTY_SESSION_ID_HEX_LEN] = '\0';
+            cd->authenticated = true;
+            pty_session_t *session = pty_session_find(cd->session_id);
+            if (session != NULL) {
+                pty_session_attach_conn(session, conn);
+            }
+            cJSON *ok = cJSON_CreateObject();
+            if (ok != NULL) {
+                cJSON_AddStringToObject(ok, "type", "auth_ok");
+                cJSON_AddStringToObject(ok, "session_id", cd->session_id);
+                ws_send_json(conn, ok);
+                cJSON_Delete(ok);
+            }
+        }
+    }
+
+    mg_set_user_connection_data(conn, cd);
+}
+
+/*
+ * WebSocket data handler — called for each incoming frame.
+ * Returns 1 to keep connection open, 0 to close.
+ */
+static int ws_terminal_data(struct mg_connection *conn, int bits,
+                            char *data, size_t data_len, void *cbdata)
+{
+    (void)cbdata;
+    int opcode = bits & 0x0F;
+
+    /* Only handle text frames */
+    if (opcode != MG_WEBSOCKET_OPCODE_TEXT) {
+        if (opcode == MG_WEBSOCKET_OPCODE_PING) {
+            mg_websocket_write(conn, MG_WEBSOCKET_OPCODE_PONG, data, data_len);
+            return 1;
+        }
+        if (opcode == MG_WEBSOCKET_OPCODE_CONNECTION_CLOSE) {
+            return 0;
+        }
+        return 1; /* Ignore other opcodes */
+    }
+
+    /* Reject oversized messages */
+    if (data_len > WS_MAX_PAYLOAD_SIZE) {
+        ws_send_error(conn, "message too large");
+        return 0;
+    }
+
+    ws_conn_data_t *cd = (ws_conn_data_t *)mg_get_user_connection_data(conn);
+    if (cd == NULL) {
+        return 0;
+    }
+
+    /* Null-terminate the data for JSON parsing (civetweb guarantees buffer space) */
+    char *json_buf = malloc(data_len + 1);
+    if (json_buf == NULL) {
+        ws_send_error(conn, "internal error");
+        return 0;
+    }
+    memcpy(json_buf, data, data_len);
+    json_buf[data_len] = '\0';
+
+    cJSON *msg = cJSON_Parse(json_buf);
+    free(json_buf);
+    if (msg == NULL) {
+        ws_send_error(conn, "invalid JSON");
+        return 1;
+    }
+
+    cJSON *type_item = cJSON_GetObjectItem(msg, "type");
+    if (!cJSON_IsString(type_item)) {
+        cJSON_Delete(msg);
+        ws_send_error(conn, "missing or invalid type field");
+        return 1;
+    }
+    const char *type = type_item->valuestring;
+
+    /* --- Authentication (must be first message) --- */
+    if (!cd->authenticated) {
+        if (strcmp(type, "auth") != 0) {
+            cJSON_Delete(msg);
+            ws_send_error(conn, "authentication required");
+            return 0;
+        }
+
+        cJSON *sid = cJSON_GetObjectItem(msg, "session_id");
+        cJSON *ticket = cJSON_GetObjectItem(msg, "ticket");
+        if (!cJSON_IsString(sid) || !cJSON_IsString(ticket)) {
+            cJSON_Delete(msg);
+            ws_send_error(conn, "invalid auth message");
+            return 0;
+        }
+
+        if (!pty_session_authenticate_ticket(sid->valuestring, ticket->valuestring)) {
+            cJSON_Delete(msg);
+            ws_send_error(conn, "authentication failed");
+            return 0;
+        }
+
+        /* Authentication succeeded */
+        strncpy(cd->session_id, sid->valuestring, PTY_SESSION_ID_HEX_LEN);
+        cd->session_id[PTY_SESSION_ID_HEX_LEN] = '\0';
+        cd->authenticated = true;
+
+        pty_session_t *session = pty_session_find(cd->session_id);
+        if (session != NULL) {
+            pty_session_attach_conn(session, conn);
+        }
+
+        cJSON *ok = cJSON_CreateObject();
+        if (ok != NULL) {
+            cJSON_AddStringToObject(ok, "type", "auth_ok");
+            cJSON_AddStringToObject(ok, "session_id", cd->session_id);
+            ws_send_json(conn, ok);
+            cJSON_Delete(ok);
+        }
+        cJSON_Delete(msg);
+        return 1;
+    }
+
+    /* --- Authenticated message handling --- */
+
+    pty_session_t *session = pty_session_find(cd->session_id);
+    if (session == NULL || session->status == PTY_STATUS_TERMINATED) {
+        cJSON_Delete(msg);
+        ws_send_error(conn, "session terminated");
+        return 0;
+    }
+
+    if (strcmp(type, "input") == 0) {
+        cJSON *data_item = cJSON_GetObjectItem(msg, "data");
+        if (cJSON_IsString(data_item) && data_item->valuestring != NULL) {
+            size_t len = strlen(data_item->valuestring);
+            if (len > 0 && len <= 4096) {
+                pty_session_write_input(session, data_item->valuestring, len);
+            }
+        }
+    } else if (strcmp(type, "resize") == 0) {
+        cJSON *cols_item = cJSON_GetObjectItem(msg, "cols");
+        cJSON *rows_item = cJSON_GetObjectItem(msg, "rows");
+        if (cJSON_IsNumber(cols_item) && cJSON_IsNumber(rows_item)) {
+            int c = cols_item->valueint;
+            int r = rows_item->valueint;
+            if (c > 0 && c <= 500 && r > 0 && r <= 200) {
+                pty_session_resize(session, (unsigned short)c, (unsigned short)r);
+            }
+        }
+    } else if (strcmp(type, "ping") == 0) {
+        cJSON *pong = cJSON_CreateObject();
+        if (pong != NULL) {
+            cJSON_AddStringToObject(pong, "type", "pong");
+            ws_send_json(conn, pong);
+            cJSON_Delete(pong);
+        }
+    } else {
+        ws_send_error(conn, "unknown message type");
+    }
+
+    cJSON_Delete(msg);
+    return 1;
+}
+
+/*
+ * WebSocket close handler — called when connection closes.
+ * Detaches from PTY session and frees per-connection state.
+ */
+static void ws_terminal_close(const struct mg_connection *conn, void *cbdata)
+{
+    (void)cbdata;
+    ws_conn_data_t *cd = (ws_conn_data_t *)mg_get_user_connection_data(conn);
+    if (cd == NULL) return;
+
+    if (cd->authenticated && cd->session_id[0] != '\0') {
+        pty_session_t *session = pty_session_find(cd->session_id);
+        if (session != NULL) {
+            pty_session_detach_conn(session);
+        }
+    }
+
+    free(cd);
+    mg_set_user_connection_data(conn, NULL);
+}
+
+/* ---- Terminal Session REST Endpoints ----------------------------------- */
+
+/*
+ * POST /api/terminal       — Create a new terminal session.
+ * GET  /api/terminal       — List all terminal sessions.
+ */
+static int handle_terminal(struct mg_connection *conn, void *cbdata)
+{
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    (void)cbdata;
+
+    if (!validate_request_headers(conn, ri)) {
+        return 200;
+    }
+
+    if (!authenticate_request(conn)) {
+        return 200;
+    }
+
+    /* Exact match for /api/terminal */
+    if (strcmp(ri->local_uri, "/api/terminal") != 0 &&
+        strcmp(ri->local_uri, "/api/terminal/") != 0) {
+        /* Sub-path: route to handle_terminal_session */
+        return 0; /* Let CivetWeb fall through to more specific handler */
+    }
+
+    if (strcmp(ri->request_method, "POST") == 0) {
+        /* Create new terminal session */
+        char *body = NULL;
+        unsigned short cols = 80, rows = 24;
+
+        if (ri->content_length > 0) {
+            int read_res = read_request_body(conn, ri, &body);
+            if (read_res != 200) {
+                if (read_res == 413) {
+                    send_error(conn, 413, "payload too large");
+                } else {
+                    send_error(conn, read_res, "failed to read request body");
+                }
+                return 200;
+            }
+
+            if (!json_parse_terminal_create(body, &cols, &rows)) {
+                free(body);
+                send_error(conn, 400, "invalid terminal creation request");
+                return 200;
+            }
+            free(body);
+        }
+
+        pty_session_t *session = pty_session_create(cols, rows);
+        if (session == NULL) {
+            send_error(conn, 503, "max sessions reached or PTY allocation failed");
+            return 200;
+        }
+
+        char *json = json_serialize_terminal_session(session);
+        if (json == NULL) {
+            send_error(conn, 500, "internal error");
+            return 200;
+        }
+
+        send_json_response(conn, 201, json);
+        free(json);
+        return 200;
+
+    } else if (strcmp(ri->request_method, "GET") == 0) {
+        /* List sessions */
+        pty_session_t list[PTY_MAX_SESSIONS];
+        int count = pty_session_list(list, PTY_MAX_SESSIONS);
+
+        char *json = json_serialize_terminal_session_list(list, count);
+        if (json == NULL) {
+            send_error(conn, 500, "internal error");
+            return 200;
+        }
+
+        send_json_response(conn, 200, json);
+        free(json);
+        return 200;
+
+    } else {
+        send_error(conn, 405, "method not allowed");
+        return 200;
+    }
+}
+
+/*
+ * DELETE /api/terminal/:id           — Terminate and delete a session.
+ * POST  /api/terminal/:id/resize     — Resize the terminal.
+ * POST  /api/terminal/:id/reconnect  — Issue a new WebSocket ticket.
+ */
+static int handle_terminal_session(struct mg_connection *conn, void *cbdata)
+{
+    const struct mg_request_info *ri = mg_get_request_info(conn);
+    (void)cbdata;
+
+    if (!validate_request_headers(conn, ri)) {
+        return 200;
+    }
+
+    if (!authenticate_request(conn)) {
+        return 200;
+    }
+
+    /* Parse session ID from URI: /api/terminal/<session_id>[/<action>] */
+    const char *prefix = "/api/terminal/";
+    size_t prefix_len = strlen(prefix);
+    const char *uri = ri->local_uri;
+
+    if (strncmp(uri, prefix, prefix_len) != 0) {
+        send_error(conn, 404, "not found");
+        return 200;
+    }
+
+    const char *rest = uri + prefix_len;
+    if (rest[0] == '\0') {
+        send_error(conn, 400, "missing session ID");
+        return 200;
+    }
+
+    /* Extract session ID (up to next '/' or end of string) */
+    char session_id[PTY_SESSION_ID_HEX_LEN + 1];
+    const char *slash = strchr(rest, '/');
+    size_t id_len;
+    const char *action = NULL;
+
+    if (slash != NULL) {
+        id_len = (size_t)(slash - rest);
+        action = slash + 1;
+    } else {
+        id_len = strlen(rest);
+    }
+
+    if (id_len == 0 || id_len > PTY_SESSION_ID_HEX_LEN) {
+        send_error(conn, 400, "invalid session ID");
+        return 200;
+    }
+
+    memcpy(session_id, rest, id_len);
+    session_id[id_len] = '\0';
+
+    /* Look up session */
+    pty_session_t *session = pty_session_find(session_id);
+    if (session == NULL) {
+        send_error(conn, 404, "session not found");
+        return 200;
+    }
+
+    /* Route by action */
+    if (action == NULL || action[0] == '\0') {
+        /* DELETE /api/terminal/:id */
+        if (strcmp(ri->request_method, "DELETE") != 0) {
+            send_error(conn, 405, "method not allowed");
+            return 200;
+        }
+
+        pty_session_delete(session_id);
+        send_json_response(conn, 200, "{\"status\":\"deleted\"}");
+        return 200;
+
+    } else if (strcmp(action, "resize") == 0) {
+        if (strcmp(ri->request_method, "POST") != 0) {
+            send_error(conn, 405, "method not allowed");
+            return 200;
+        }
+
+        char *body = NULL;
+        int read_res = read_request_body(conn, ri, &body);
+        if (read_res != 200) {
+            if (read_res == 413) {
+                send_error(conn, 413, "payload too large");
+            } else {
+                send_error(conn, read_res, "failed to read request body");
+            }
+            return 200;
+        }
+
+        cJSON *root = cJSON_Parse(body);
+        free(body);
+        if (root == NULL) {
+            send_error(conn, 400, "invalid JSON");
+            return 200;
+        }
+
+        cJSON *cols_item = cJSON_GetObjectItem(root, "cols");
+        cJSON *rows_item = cJSON_GetObjectItem(root, "rows");
+        if (!cJSON_IsNumber(cols_item) || !cJSON_IsNumber(rows_item) ||
+            cols_item->valueint <= 0 || cols_item->valueint > 500 ||
+            rows_item->valueint <= 0 || rows_item->valueint > 200) {
+            cJSON_Delete(root);
+            send_error(conn, 400, "invalid cols/rows values");
+            return 200;
+        }
+
+        int ret = pty_session_resize(session,
+                                     (unsigned short)cols_item->valueint,
+                                     (unsigned short)rows_item->valueint);
+        cJSON_Delete(root);
+
+        if (ret < 0) {
+            send_error(conn, 500, "resize failed");
+            return 200;
+        }
+
+        send_json_response(conn, 200, "{\"status\":\"ok\"}");
+        return 200;
+
+    } else if (strcmp(action, "reconnect") == 0) {
+        if (strcmp(ri->request_method, "POST") != 0) {
+            send_error(conn, 405, "method not allowed");
+            return 200;
+        }
+
+        if (session->status == PTY_STATUS_TERMINATED) {
+            send_error(conn, 410, "session terminated");
+            return 200;
+        }
+
+        char new_ticket[PTY_TICKET_HEX_LEN + 1];
+        if (pty_session_issue_reconnect_ticket(session_id, new_ticket,
+                                               sizeof(new_ticket)) < 0) {
+            send_error(conn, 410, "session terminated or grace period expired");
+            return 200;
+        }
+
+        cJSON *resp = cJSON_CreateObject();
+        if (resp != NULL) {
+            cJSON_AddStringToObject(resp, "session_id", session_id);
+            cJSON_AddStringToObject(resp, "ws_ticket", new_ticket);
+            cJSON_AddNumberToObject(resp, "expires_in", (double)PTY_TICKET_EXPIRY_SEC);
+
+            char *json = cJSON_PrintUnformatted(resp);
+            cJSON_Delete(resp);
+            explicit_bzero(new_ticket, sizeof(new_ticket));
+
+            if (json != NULL) {
+                send_json_response(conn, 200, json);
+                free(json);
+            } else {
+                send_error(conn, 500, "internal error");
+            }
+        } else {
+            send_error(conn, 500, "internal error");
+        }
+
+        return 200;
+
+    } else {
+        send_error(conn, 404, "unknown action");
+        return 200;
+    }
+}
+
 /* ---- Server Lifecycle -------------------------------------------------- */
 
 void server_config_init(server_config_t *config)
@@ -712,6 +1241,8 @@ void server_config_init(server_config_t *config)
     config->document_root = NULL;
     config->auth_token = NULL;
     config->allow_root = false;
+    config->shell_path = NULL;
+    config->pty_grace_period_sec = PTY_DEFAULT_GRACE_SEC;
 }
 
 static void print_usage(const char *progname)
@@ -724,6 +1255,8 @@ static void print_usage(const char *progname)
             "Options:\n"
             "  -p, --port PORT        Listen port (default: %d)\n"
             "  -d, --document-root DIR  Static file directory\n"
+            "  --shell-path PATH      Path to SmartShell binary (default: bin/smartshell)\n"
+            "  --pty-grace SEC        Disconnect reconnect grace period (default: 30)\n"
             "  --danger-allow-root    Allow running as root (dangerous)\n"
             "  -h, --help             Show this help message\n"
             "\n"
@@ -755,6 +1288,16 @@ int server_config_parse_args(server_config_t *config, int argc, char **argv)
             config->document_root = argv[++i];
         } else if (strcmp(argv[i], "--danger-allow-root") == 0) {
             config->allow_root = true;
+        } else if (strcmp(argv[i], "--shell-path") == 0 && i + 1 < argc) {
+            config->shell_path = argv[++i];
+        } else if (strcmp(argv[i], "--pty-grace") == 0 && i + 1 < argc) {
+            char *endptr = NULL;
+            long grace = strtol(argv[++i], &endptr, 10);
+            if (*endptr != '\0' || grace < 0 || grace > 3600) {
+                fprintf(stderr, "Error: invalid pty-grace '%s'\n", argv[i]);
+                return -1;
+            }
+            config->pty_grace_period_sec = (int)grace;
         } else if (strcmp(argv[i], "-h") == 0 ||
                    strcmp(argv[i], "--help") == 0) {
             print_usage(argv[0]);
@@ -844,8 +1387,19 @@ int server_start(const server_config_t *config)
     }
     civetweb_options[opt_idx] = NULL;
 
-    /* Initialize CivetWeb library */
-    mg_init_library(0);
+    /* Initialize CivetWeb library (with WebSocket support) */
+    mg_init_library(MG_FEATURES_WEBSOCKET);
+
+    /* Initialize PTY session manager */
+    const char *shell = config->shell_path;
+    if (shell == NULL || shell[0] == '\0') {
+        /* Resolve path relative to current working directory */
+        shell = "bin/smartshell";
+    }
+    if (pty_manager_init(shell, config->pty_grace_period_sec) < 0) {
+        fprintf(stderr, "Warning: PTY session manager initialization failed\n");
+        /* Non-fatal: REST APIs still work, but terminal sessions won't */
+    }
 
     /* Start CivetWeb server */
     struct mg_callbacks callbacks;
@@ -867,6 +1421,24 @@ int server_start(const server_config_t *config)
     mg_set_request_handler(g_ctx, "/api/process-tree", handle_process_tree, NULL);
     mg_set_request_handler(g_ctx, "/api/scheduler/simulate", handle_scheduler_simulate, NULL);
     mg_set_request_handler(g_ctx, "/api/scheduler/compare", handle_scheduler_compare, NULL);
+
+    /* Register terminal session REST endpoints */
+    mg_set_request_handler(g_ctx, "/api/terminal$", handle_terminal, NULL);
+    mg_set_request_handler(g_ctx, "/api/terminal/", handle_terminal_session, NULL);
+
+    /* Register WebSocket handler for terminal bridge */
+    mg_set_websocket_handler(g_ctx, "/ws/terminal",
+                             ws_terminal_connect,
+                             ws_terminal_ready,
+                             ws_terminal_data,
+                             ws_terminal_close,
+                             NULL);
+    mg_set_websocket_handler(g_ctx, "/api/terminal/ws",
+                             ws_terminal_connect,
+                             ws_terminal_ready,
+                             ws_terminal_data,
+                             ws_terminal_close,
+                             NULL);
 
     /* Install signal handlers for graceful shutdown */
     struct sigaction sa;
@@ -901,6 +1473,9 @@ int server_start(const server_config_t *config)
 
     fprintf(stdout, "\nShutting down server...\n");
     fflush(stdout);
+
+    /* Clean up PTY sessions and reader thread */
+    pty_manager_shutdown();
 
     /* Stop CivetWeb server and clean up */
     mg_stop(g_ctx);

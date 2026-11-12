@@ -569,3 +569,100 @@ char *json_serialize_sched_compare(const sched_compare_result_t *cmp)
     return out;
 }
 
+char *json_serialize_terminal_session(const pty_session_t *session)
+{
+    if (session == NULL) return NULL;
+
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) return NULL;
+
+    cJSON_AddStringToObject(root, "session_id", session->session_id);
+    cJSON_AddStringToObject(root, "ws_ticket", session->ws_ticket);
+    time_t now = time(NULL);
+    long remaining = (long)(session->ticket_expires_at - now);
+    if (remaining < 0) remaining = 0;
+    cJSON_AddNumberToObject(root, "expires_in", (double)remaining);
+    cJSON_AddNumberToObject(root, "pid", (double)session->child_pid);
+    cJSON_AddStringToObject(root, "status", pty_session_status_str(session->status));
+    cJSON_AddNumberToObject(root, "cols", (double)session->cols);
+    cJSON_AddNumberToObject(root, "rows", (double)session->rows);
+    cJSON_AddNumberToObject(root, "created_at", (double)session->created_at);
+
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return out;
+}
+
+char *json_serialize_terminal_session_list(const pty_session_t *sessions, int count)
+{
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) return NULL;
+
+    cJSON *arr = cJSON_CreateArray();
+    if (arr == NULL) {
+        cJSON_Delete(root);
+        return NULL;
+    }
+
+    for (int i = 0; i < count; i++) {
+        cJSON *node = cJSON_CreateObject();
+        if (node != NULL) {
+            cJSON_AddStringToObject(node, "session_id", sessions[i].session_id);
+            cJSON_AddNumberToObject(node, "pid", (double)sessions[i].child_pid);
+            cJSON_AddStringToObject(node, "status", pty_session_status_str(sessions[i].status));
+            cJSON_AddNumberToObject(node, "cols", (double)sessions[i].cols);
+            cJSON_AddNumberToObject(node, "rows", (double)sessions[i].rows);
+            cJSON_AddNumberToObject(node, "created_at", (double)sessions[i].created_at);
+            cJSON_AddItemToArray(arr, node);
+        }
+    }
+
+    cJSON_AddItemToObject(root, "sessions", arr);
+    cJSON_AddNumberToObject(root, "count", (double)count);
+
+    char *out = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    return out;
+}
+
+bool json_parse_terminal_create(const char *json_str, unsigned short *cols, unsigned short *rows)
+{
+    if (cols != NULL) *cols = 80;
+    if (rows != NULL) *rows = 24;
+
+    if (json_str == NULL || json_str[0] == '\0') {
+        return true;
+    }
+
+    cJSON *root = cJSON_Parse(json_str);
+    if (root == NULL) {
+        return false;
+    }
+
+    if (!cJSON_IsObject(root)) {
+        cJSON_Delete(root);
+        return false;
+    }
+
+    cJSON *c = cJSON_GetObjectItem(root, "cols");
+    if (c != NULL) {
+        if (!cJSON_IsNumber(c) || c->valueint <= 0 || c->valueint > 500) {
+            cJSON_Delete(root);
+            return false;
+        }
+        if (cols != NULL) *cols = (unsigned short)c->valueint;
+    }
+
+    cJSON *r = cJSON_GetObjectItem(root, "rows");
+    if (r != NULL) {
+        if (!cJSON_IsNumber(r) || r->valueint <= 0 || r->valueint > 200) {
+            cJSON_Delete(root);
+            return false;
+        }
+        if (rows != NULL) *rows = (unsigned short)r->valueint;
+    }
+
+    cJSON_Delete(root);
+    return true;
+}
+
