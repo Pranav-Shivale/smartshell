@@ -43,6 +43,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     switchView(viewName) {
       this.activeView = viewName;
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, null, `#${viewName}`);
+      }
 
       // Update sidebar nav active state
       document.querySelectorAll('.nav-item').forEach((item) => {
@@ -85,6 +88,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (viewName === 'system') {
         this.fetchSystemData();
+      }
+
+      if (viewName === 'scheduling') {
+        if (!this._hasRunInitialSim) {
+          this._hasRunInitialSim = true;
+          setTimeout(() => this.runSimulation(), 60);
+        }
       }
 
       if (viewName === 'terminal') {
@@ -147,6 +157,13 @@ document.addEventListener('DOMContentLoaded', () => {
           if (auth && auth.authenticated) {
             this.setConnectionStatus('connected', 'Authenticated');
             await this.syncTerminalSessions();
+            let targetView = (window.location.hash || '').replace('#', '');
+            if (!targetView) {
+              try { targetView = window.sessionStorage.getItem('smartshell_view'); } catch (_) {}
+            }
+            if (targetView && ['terminal', 'dashboard', 'processes', 'scheduling', 'system', 'settings'].includes(targetView)) {
+              this.switchView(targetView);
+            }
           } else {
             this.setConnectionStatus('disconnected', 'Invalid Token');
             this.switchView('settings');
@@ -530,7 +547,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
       if (displayList.length === 0) {
         const emptyTr = document.createElement('tr');
-        emptyTr.innerHTML = '<td colspan="8" style="text-align: center; color: var(--text-muted); padding: 24px;">No matching processes found</td>';
+        emptyTr.innerHTML = '<td colspan="8"><div class="empty-state">No matching processes found</div></td>';
         tbody.appendChild(emptyTr);
         return;
       }
@@ -550,12 +567,12 @@ document.addEventListener('DOMContentLoaded', () => {
         tr.innerHTML = `
           <td><strong>${p.pid}</strong></td>
           <td>${p.ppid}</td>
-          <td><span style="font-weight: 500;">${this._escapeHTML(p.name)}</span></td>
+          <td><span class="proc-name">${this._escapeHTML(p.name)}</span></td>
           <td><span class="badge ${badgeClass}">${stateChar}</span></td>
-          <td>${cpuText}</td>
-          <td>${memMB} MB</td>
-          <td>${p.threads || 1}</td>
-          <td style="text-align: right;">
+          <td class="num">${cpuText}</td>
+          <td class="num">${memMB} MB</td>
+          <td class="num">${p.threads || 1}</td>
+          <td class="num">
             <button class="btn btn-secondary btn-sm" onclick="app.openProcModal(${p.pid})">Inspect</button>
           </td>
         `;
@@ -572,7 +589,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!modal || !content) return;
 
       if (title) title.textContent = `Process Details — PID ${pid}`;
-      content.innerHTML = '<div style="color: var(--text-muted); padding: 20px; text-align: center;">Loading process metrics...</div>';
+      content.innerHTML = '<div class="loading-state">Loading process metrics...</div>';
       modal.classList.add('active');
 
       try {
@@ -585,23 +602,23 @@ document.addEventListener('DOMContentLoaded', () => {
           <table class="info-table">
             <tbody>
               <tr><td>Process Name</td><td><strong>${this._escapeHTML(p.name)}</strong></td></tr>
-              <tr><td>Process ID (PID)</td><td>${p.pid}</td></tr>
-              <tr><td>Parent PID (PPID)</td><td>${p.ppid}</td></tr>
-              <tr><td>Process Group (PGID)</td><td>${p.pgid}</td></tr>
-              <tr><td>Session ID (SID)</td><td>${p.sid}</td></tr>
-              <tr><td>User ID (UID)</td><td>${p.uid}</td></tr>
+              <tr><td>Process ID (PID)</td><td class="num">${p.pid}</td></tr>
+              <tr><td>Parent PID (PPID)</td><td class="num">${p.ppid}</td></tr>
+              <tr><td>Process Group (PGID)</td><td class="num">${p.pgid}</td></tr>
+              <tr><td>Session ID (SID)</td><td class="num">${p.sid}</td></tr>
+              <tr><td>User ID (UID)</td><td class="num">${p.uid}</td></tr>
               <tr><td>Execution State</td><td>${p.state_str || p.state} (${p.state})</td></tr>
-              <tr><td>Thread Count</td><td>${p.threads}</td></tr>
-              <tr><td>Live CPU Utilization</td><td>${cpuPct}</td></tr>
-              <tr><td>Resident Memory (RSS)</td><td>${memRSS} MB (${(p.rss_bytes || 0).toLocaleString()} bytes)</td></tr>
-              <tr><td>Virtual Memory (VSIZE)</td><td>${memVSIZE} MB (${(p.vsize_bytes || 0).toLocaleString()} bytes)</td></tr>
-              <tr><td>User Time Ticks</td><td>${p.utime_ticks || 0}</td></tr>
-              <tr><td>Kernel System Ticks</td><td>${p.stime_ticks || 0}</td></tr>
+              <tr><td>Thread Count</td><td class="num">${p.threads}</td></tr>
+              <tr><td>Live CPU Utilization</td><td class="num">${cpuPct}</td></tr>
+              <tr><td>Resident Memory (RSS)</td><td class="num">${memRSS} MB (${(p.rss_bytes || 0).toLocaleString()} bytes)</td></tr>
+              <tr><td>Virtual Memory (VSIZE)</td><td class="num">${memVSIZE} MB (${(p.vsize_bytes || 0).toLocaleString()} bytes)</td></tr>
+              <tr><td>User Time Ticks</td><td class="num">${p.utime_ticks || 0}</td></tr>
+              <tr><td>Kernel System Ticks</td><td class="num">${p.stime_ticks || 0}</td></tr>
             </tbody>
           </table>
         `;
       } catch (err) {
-        content.innerHTML = `<div style="color: var(--accent-rose); padding: 16px;">Failed to inspect process ${pid}: ${err.message}</div>`;
+        content.innerHTML = `<div class="error-state">Failed to inspect process ${pid}: ${this._escapeHTML(err.message)}</div>`;
       }
     },
 
@@ -691,12 +708,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td><input type="number" class="form-input" style="width: 60px; padding: 4px;" value="${pid}" min="1"></td>
-        <td><input type="number" class="form-input" style="width: 80px; padding: 4px;" value="${arrival}" min="0"></td>
-        <td><input type="number" class="form-input" style="width: 80px; padding: 4px;" value="${burst}" min="1"></td>
-        <td><input type="number" class="form-input" style="width: 80px; padding: 4px;" value="${priority}" min="1"></td>
-        <td style="text-align: right;">
-          <button class="btn btn-secondary btn-sm remove-row-btn" style="padding: 2px 8px; color: var(--accent-rose);">&times;</button>
+        <td><input type="number" class="form-input form-input-sm form-input-num" value="${pid}" min="1"></td>
+        <td><input type="number" class="form-input form-input-sm form-input-num" value="${arrival}" min="0"></td>
+        <td><input type="number" class="form-input form-input-sm form-input-num" value="${burst}" min="1"></td>
+        <td><input type="number" class="form-input form-input-sm form-input-num" value="${priority}" min="1"></td>
+        <td class="num">
+          <button class="btn btn-ghost btn-sm remove-row-btn" title="Remove process">&times;</button>
         </td>
       `;
 
@@ -743,7 +760,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const quantum = parseInt(document.getElementById('sched-quantum-input')?.value || '4', 10);
       const container = document.getElementById('sched-results-container');
       if (container) {
-        container.innerHTML = '<div style="color: var(--text-muted); padding: 14px;">Running scheduling simulation...</div>';
+        container.innerHTML = '<div class="loading-state">Running scheduling simulation...</div>';
       }
 
       try {
@@ -751,7 +768,7 @@ document.addEventListener('DOMContentLoaded', () => {
         this._renderSimulationOutput(res);
       } catch (err) {
         if (container) {
-          container.innerHTML = `<div style="color: var(--accent-rose); padding: 14px;">Simulation failed: ${err.message}</div>`;
+          container.innerHTML = `<div class="error-state">Simulation failed: ${this._escapeHTML(err.message)}</div>`;
         }
         this.showToast(`Simulation failed: ${err.message}`, 'error');
       }
@@ -767,17 +784,24 @@ document.addEventListener('DOMContentLoaded', () => {
       const totalTime = summary.total_elapsed_time || (timeline.length > 0 ? timeline[timeline.length - 1].end_time : 1);
       const util = summary.cpu_utilization !== undefined ? (summary.cpu_utilization * 100).toFixed(1) : '100.0';
 
-      const colors = ['#388bfd', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#06b6d4', '#eab308'];
+      const colors = [
+        'var(--gantt-p1)',
+        'var(--gantt-p2)',
+        'var(--gantt-p3)',
+        'var(--gantt-p4)',
+        'var(--gantt-p5)',
+        'var(--gantt-p6)',
+        'var(--gantt-p7)'
+      ];
 
       let timelineHtml = '';
-      let scaleHtml = '';
 
       if (timeline.length > 0) {
         const slices = timeline.map((slice) => {
           const dur = slice.end_time - slice.start_time;
           const pct = Math.max(0.5, (dur / totalTime) * 100);
           const isIdle = slice.is_idle || slice.pid === 0;
-          const bg = isIdle ? 'var(--bg-input)' : colors[slice.pid % colors.length];
+          const bg = isIdle ? 'var(--gantt-idle)' : colors[(slice.pid - 1 + colors.length) % colors.length];
           const label = isIdle ? 'IDLE' : `P${slice.pid}`;
 
           return `<div class="gantt-block" style="width: ${pct}%; background-color: ${bg};" title="${label}: [${slice.start_time} - ${slice.end_time}] (${dur} ticks)">
@@ -786,10 +810,10 @@ document.addEventListener('DOMContentLoaded', () => {
         }).join('');
 
         timelineHtml = `
-          <div style="margin: 12px 0;">
-            <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 6px;">CPU Execution Timeline</div>
+          <div class="gantt-timeline-section">
+            <div class="gantt-timeline-label">CPU Execution Timeline</div>
             <div class="gantt-chart-bar">${slices}</div>
-            <div class="gantt-time-scale" style="justify-content: space-between; margin-top: 4px;">
+            <div class="gantt-time-scale">
               <span>T: 0</span>
               <span>T: ${Math.round(totalTime / 2)}</span>
               <span>T: ${totalTime}</span>
@@ -801,30 +825,30 @@ document.addEventListener('DOMContentLoaded', () => {
       let procTableHtml = '';
       if (processes.length > 0) {
         procTableHtml = `
-          <table class="data-table" style="margin-top: 14px;">
+          <table class="data-table">
             <thead>
               <tr>
                 <th>PID</th>
-                <th>Arrival</th>
-                <th>Burst</th>
-                <th>Start</th>
-                <th>Completion</th>
-                <th>Waiting</th>
-                <th>Turnaround</th>
-                <th>Response</th>
+                <th class="num">Arrival</th>
+                <th class="num">Burst</th>
+                <th class="num">Start</th>
+                <th class="num">Completion</th>
+                <th class="num">Waiting</th>
+                <th class="num">Turnaround</th>
+                <th class="num">Response</th>
               </tr>
             </thead>
             <tbody>
               ${processes.map((p) => `
                 <tr>
                   <td><strong>P${p.pid}</strong></td>
-                  <td>${p.arrival_time}</td>
-                  <td>${p.burst_time}</td>
-                  <td>${p.start_time}</td>
-                  <td>${p.completion_time}</td>
-                  <td>${p.waiting_time}</td>
-                  <td>${p.turnaround_time}</td>
-                  <td>${p.response_time}</td>
+                  <td class="num">${p.arrival_time}</td>
+                  <td class="num">${p.burst_time}</td>
+                  <td class="num">${p.start_time}</td>
+                  <td class="num">${p.completion_time}</td>
+                  <td class="num">${p.waiting_time}</td>
+                  <td class="num">${p.turnaround_time}</td>
+                  <td class="num">${p.response_time}</td>
                 </tr>
               `).join('')}
             </tbody>
@@ -833,34 +857,34 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       container.innerHTML = `
-        <div class="card-header" style="padding-bottom: 8px; border-bottom: 1px solid var(--border-light);">
+        <div class="card-header">
           <span class="card-title">${(res.algorithm || this.selectedAlgorithm).toUpperCase()} Execution Results</span>
-          <span style="font-size: 0.82rem; color: var(--text-muted); font-family: var(--font-mono);">
+          <span class="text-secondary font-mono text-xs">
             Elapsed: <strong>${totalTime}</strong> ticks &nbsp;|&nbsp; CPU Util: <strong>${util}%</strong>
           </span>
         </div>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 10px 0;">
-          <div style="background: var(--bg-sidebar); padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
-            <div style="font-size: 0.75rem; color: var(--text-muted);">Avg Waiting Time</div>
-            <div style="font-size: 1.15rem; font-weight: 700; color: var(--accent-cyan); font-family: var(--font-mono);">
+        <div class="sim-summary-grid">
+          <div class="sim-stat-box">
+            <div class="sim-stat-label">Avg Waiting Time</div>
+            <div class="sim-stat-val">
               ${summary.avg_waiting_time !== undefined ? summary.avg_waiting_time.toFixed(2) : '-'}
             </div>
           </div>
-          <div style="background: var(--bg-sidebar); padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
-            <div style="font-size: 0.75rem; color: var(--text-muted);">Avg Turnaround Time</div>
-            <div style="font-size: 1.15rem; font-weight: 700; color: var(--accent-emerald); font-family: var(--font-mono);">
+          <div class="sim-stat-box">
+            <div class="sim-stat-label">Avg Turnaround Time</div>
+            <div class="sim-stat-val">
               ${summary.avg_turnaround_time !== undefined ? summary.avg_turnaround_time.toFixed(2) : '-'}
             </div>
           </div>
-          <div style="background: var(--bg-sidebar); padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
-            <div style="font-size: 0.75rem; color: var(--text-muted);">Avg Response Time</div>
-            <div style="font-size: 1.15rem; font-weight: 700; color: var(--accent-amber); font-family: var(--font-mono);">
+          <div class="sim-stat-box">
+            <div class="sim-stat-label">Avg Response Time</div>
+            <div class="sim-stat-val">
               ${summary.avg_response_time !== undefined ? summary.avg_response_time.toFixed(2) : '-'}
             </div>
           </div>
-          <div style="background: var(--bg-sidebar); padding: 10px 14px; border-radius: var(--radius-sm); border: 1px solid var(--border);">
-            <div style="font-size: 0.75rem; color: var(--text-muted);">CPU Utilization</div>
-            <div style="font-size: 1.15rem; font-weight: 700; color: var(--accent-blue); font-family: var(--font-mono);">
+          <div class="sim-stat-box">
+            <div class="sim-stat-label">CPU Utilization</div>
+            <div class="sim-stat-val">
               ${util}%
             </div>
           </div>
@@ -880,7 +904,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const quantum = parseInt(document.getElementById('sched-quantum-input')?.value || '4', 10);
       const container = document.getElementById('sched-results-container');
       if (container) {
-        container.innerHTML = '<div style="color: var(--text-muted); padding: 14px;">Comparing all 5 scheduling algorithms...</div>';
+        container.innerHTML = '<div class="loading-state">Comparing all 5 scheduling algorithms...</div>';
       }
 
       try {
@@ -888,7 +912,7 @@ document.addEventListener('DOMContentLoaded', () => {
         this._renderCompareOutput(res);
       } catch (err) {
         if (container) {
-          container.innerHTML = `<div style="color: var(--accent-rose); padding: 14px;">Comparison failed: ${err.message}</div>`;
+          container.innerHTML = `<div class="error-state">Comparison failed: ${this._escapeHTML(err.message)}</div>`;
         }
         this.showToast(`Comparison failed: ${err.message}`, 'error');
       }
@@ -910,19 +934,19 @@ document.addEventListener('DOMContentLoaded', () => {
       const results = res.results || {};
 
       container.innerHTML = `
-        <div class="card-header" style="padding-bottom: 8px; border-bottom: 1px solid var(--border-light);">
+        <div class="card-header">
           <span class="card-title">Comparative Analysis of 5 Scheduling Algorithms</span>
-          <span style="font-size: 0.82rem; color: var(--text-muted);">Workload: <strong>${(res.workload_count || 5)}</strong> processes</span>
+          <span class="text-secondary text-xs">Workload: <strong>${(res.workload_count || 5)}</strong> processes</span>
         </div>
-        <table class="data-table" style="margin-top: 14px;">
+        <table class="data-table">
           <thead>
             <tr>
               <th>Algorithm</th>
-              <th>Avg Waiting Time</th>
-              <th>Avg Turnaround Time</th>
-              <th>Avg Response Time</th>
-              <th>CPU Utilization</th>
-              <th>Total Elapsed</th>
+              <th class="num">Avg Waiting Time</th>
+              <th class="num">Avg Turnaround Time</th>
+              <th class="num">Avg Response Time</th>
+              <th class="num">CPU Utilization</th>
+              <th class="num">Total Elapsed</th>
             </tr>
           </thead>
           <tbody>
@@ -933,11 +957,11 @@ document.addEventListener('DOMContentLoaded', () => {
               return `
                 <tr>
                   <td><strong>${names[algo] || algo.toUpperCase()}</strong></td>
-                  <td>${s.avg_waiting_time !== undefined ? s.avg_waiting_time.toFixed(2) : '-'}</td>
-                  <td>${s.avg_turnaround_time !== undefined ? s.avg_turnaround_time.toFixed(2) : '-'}</td>
-                  <td>${s.avg_response_time !== undefined ? s.avg_response_time.toFixed(2) : '-'}</td>
-                  <td>${util}</td>
-                  <td>${s.total_elapsed_time !== undefined ? s.total_elapsed_time + ' ticks' : '-'}</td>
+                  <td class="num">${s.avg_waiting_time !== undefined ? s.avg_waiting_time.toFixed(2) : '-'}</td>
+                  <td class="num">${s.avg_turnaround_time !== undefined ? s.avg_turnaround_time.toFixed(2) : '-'}</td>
+                  <td class="num">${s.avg_response_time !== undefined ? s.avg_response_time.toFixed(2) : '-'}</td>
+                  <td class="num">${util}</td>
+                  <td class="num">${s.total_elapsed_time !== undefined ? s.total_elapsed_time + ' ticks' : '-'}</td>
                 </tr>
               `;
             }).join('')}

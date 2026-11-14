@@ -1,0 +1,161 @@
+/**
+ * SmartShell 3.0 — Design System Tokens
+ * Strict professional developer tool tokens (Linear / Vercel / Grafana style)
+ * All colors, spacings, typography, and radiuses in the UI MUST reference these variables.
+ */
+
+:root {
+  /* Color: Neutral Zinc Scale (Dark mode default) */
+  --bg-canvas: #090a0c;
+  --bg-subtle: #111215;
+  --bg-surface: #17181c;
+  --bg-surface-hover: #1f2127;
+  --bg-surface-active: #272a32;
+  --bg-input: #111215;
+  --bg-overlay: rgba(0, 0, 0, 0.75);
+
+  /* Legacy mappings for backward compatibility */
+  --bg-app: var(--bg-canvas);
+  --bg-sidebar: var(--bg-subtle);
+  --bg-header: var(--bg-subtle);
+  --bg-card: var(--bg-surface);
+  --bg-card-hover: var(--bg-surface-hover);
+  --bg-terminal: var(--bg-canvas);
+
+  /* Borders: 1px subtle neutral */
+  --border-subtle: #1e2026;
+  --border-default: #282a32;
+  --border-strong: #383b46;
+  --border-focus: #3b82f6;
+
+  --border: var(--border-default);
+  --border-light: var(--border-subtle);
+
+  /* Neutral Typography Colors */
+  --text-primary: #ededef;
+  --text-secondary: #9ba1a6;
+  --text-tertiary: #60646c;
+  --text-disabled: #41444b;
+
+  --text-main: var(--text-primary);
+  --text-muted: var(--text-secondary);
+  --text-faint: var(--text-tertiary);
+
+  /* Single Primary Accent: Muted Steel Blue */
+  --accent: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-subtle: rgba(59, 130, 246, 0.12);
+  --accent-border: rgba(59, 130, 246, 0.28);
+  --accent-contrast: #ffffff;
+
+  --accent-blue: var(--accent);
+  --accent-blue-hover: var(--accent-hover);
+  --accent-cyan: #38bdf8;
+  --accent-emerald: #22c55e;
+  --accent-amber: #f59e0b;
+  --accent-rose: #ef4444;
+  --accent-purple: #a855f7;
+  --accent-indigo: #6366f1;
+
+  /* Semantic Status Colors (Muted, desaturated, high-contrast) */
+  --color-success: #22c55e;
+  --color-success-subtle: rgba(34, 197, 94, 0.12);
+  --color-success-border: rgba(34, 197, 94, 0.28);
+
+  --color-warning: #f59e0b;
+  --color-warning-subtle: rgba(245, 158, 11, 0.12);
+  --color-warning-border: rgba(245, 158, 11, 0.28);
+
+  --color-danger: #ef4444;
+  --color-danger-subtle: rgba(239, 68, 68, 0.12);
+  --color-danger-border: rgba(239, 68, 68, 0.28);
+
+  --color-info: #3b82f6;
+  --color-info-subtle: rgba(59, 130, 246, 0.12);
+  --color-info-border: rgba(59, 130, 246, 0.28);
+
+  /* Spacing Scale (ONLY 4, 8, 12, 16, 24, 32 px) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Typography Scale (ONLY 12, 13, 14, 16, 20, 24 px; max 2 weights 400 and 500) */
+  --font-size-xs: 12px;
+  --font-size-sm: 13px;
+  --font-size-base: 14px;
+  --font-size-md: 16px;
+  --font-size-lg: 20px;
+  --font-size-xl: 24px;
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+
+  /* Single Uniform Border Radius (4px everywhere) */
+  --radius: 4px;
+  --radius-sm: var(--radius);
+  --radius-md: var(--radius);
+  --radius-lg: var(--radius);
+  --radius-full: 9999px;
+
+  /* Elevation (Borders instead of shadows; no glows) */
+  --shadow-none: none;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-modal: 0 16px 32px rgba(0, 0, 0, 0.6);
+  --shadow: var(--shadow-sm);
+
+  /* Motion (120-160ms ease) */
+  --transition-fast: 140ms ease;
+  --transition-normal: 160ms ease;
+
+  /* ANSI 16 Color Palette (Muted terminal colors) */
+  --ansi-0: #1a1c22;
+  --ansi-1: #e06c75;
+  --ansi-2: #98c379;
+  --ansi-3: #e5c07b;
+  --ansi-4: #61afef;
+  --ansi-5: #c678dd;
+  --ansi-6: #56b6c2;
+  --ansi-7: #abb2bf;
+  --ansi-8: #5c6370;
+  --ansi-9: #be5046;
+  --ansi-10: #98c379;
+  --ansi-11: #d19a66;
+  --ansi-12: #61afef;
+  --ansi-13: #c678dd;
+  --ansi-14: #56b6c2;
+  --ansi-15: #ffffff;
+
+  --ansi-bg-0: #101114;
+  --ansi-bg-1: #4c282c;
+  --ansi-bg-2: #283c2e;
+  --ansi-bg-3: #4c3f25;
+  --ansi-bg-4: #22374e;
+  --ansi-bg-5: #42284c;
+  --ansi-bg-6: #213c42;
+  --ansi-bg-7: #3e4451;
+
+  /* Gantt Process Palette (Muted, non-neon, desaturated) */
+  --gantt-p1: #3b82f6;
+  --gantt-p2: #10b981;
+  --gantt-p3: #f59e0b;
+  --gantt-p4: #8b5cf6;
+  --gantt-p5: #06b6d4;
+  --gantt-p6: #ec4899;
+  --gantt-p7: #6366f1;
+  --gantt-idle: #22242b;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+

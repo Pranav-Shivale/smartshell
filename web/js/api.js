@@ -13,10 +13,15 @@ class SmartShellAPI {
     // Check URL parameters first (e.g. ?token=...)
     const urlParams = new URLSearchParams(window.location.search);
     const urlToken = urlParams.get('token');
+    const urlView = urlParams.get('view');
+    if (urlView) {
+      try { window.sessionStorage.setItem('smartshell_view', urlView); } catch (_) {}
+    }
     if (urlToken) {
       localStorage.setItem('smartshell_token', urlToken.trim());
-      // Clean query string from URL without reload
-      window.history.replaceState({}, document.title, window.location.pathname);
+      // Clean query string from URL without reload while preserving hash/view
+      const hash = urlView ? `#${urlView}` : (window.location.hash || '');
+      window.history.replaceState({}, document.title, window.location.pathname + hash);
       return urlToken.trim();
     }
     return localStorage.getItem('smartshell_token') || '';
