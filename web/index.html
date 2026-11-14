@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SmartShell 3.0 — Enterprise OS Dashboard</title>
+  <link rel="stylesheet" href="css/app.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐚</text></svg>">
+</head>
+<body>
+
+  <!-- Left Sidebar Navigation -->
+  <aside class="sidebar">
+    <a href="#" class="sidebar-brand">
+      <div class="brand-icon">&gt;_</div>
+      <div class="brand-text">
+        <span class="brand-title">SmartShell</span>
+        <span class="brand-version">v3.0 Production</span>
+      </div>
+    </a>
+
+    <div class="sidebar-nav">
+      <div class="nav-section-label">Core Management</div>
+      <a class="nav-item active" data-view="terminal">
+        <svg viewBox="0 0 16 16"><path d="M0 2.75C0 1.784.784 1 1.75 1h12.5c.966 0 1.75.784 1.75 1.75v10.5A1.75 1.75 0 0 1 14.25 15H1.75A1.75 1.75 0 0 1 0 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25V2.75a.25.25 0 0 0-.25-.25ZM7.25 8 3.97 4.72a.75.75 0 0 0-1.06 1.06L5.44 8 2.91 10.53a.75.75 0 1 0 1.06 1.06L7.25 8Zm1.5 3h4.5a.75.75 0 0 0 0-1.5h-4.5a.75.75 0 0 0 0 1.5Z"/></svg>
+        <span>Terminal Console</span>
+      </a>
+      <a class="nav-item" data-view="dashboard">
+        <svg viewBox="0 0 16 16"><path d="M1.5 1.75V13.5h13.75a.75.75 0 0 1 0 1.5H.75a.75.75 0 0 1-.75-.75V1.75a.75.75 0 0 1 1.5 0Zm14.28 2.53-5.25 5.25a.75.75 0 0 1-1.06 0L7 7.06 4.28 9.78a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042l3.25-3.25a.75.75 0 0 1 1.06 0L10 7.94l4.72-4.72a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042Z"/></svg>
+        <span>System Dashboard</span>
+      </a>
+      <a class="nav-item" data-view="processes">
+        <svg viewBox="0 0 16 16"><path d="M1.5 3A1.5 1.5 0 0 1 3 1.5h10A1.5 1.5 0 0 1 14.5 3v10a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 13Zm1.5 0v10h10V3ZM5 5.5a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2Zm3 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z"/></svg>
+        <span>Process Explorer</span>
+      </a>
+      <a class="nav-item" data-view="scheduling">
+        <svg viewBox="0 0 16 16"><path d="M0 2.5A1.5 1.5 0 0 1 1.5 1h13A1.5 1.5 0 0 1 16 2.5v11a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 0 13.5Zm1.5 0v11h13v-11ZM4 4h8v1.5H4Zm0 3.5h8V9H4Zm0 3.5h5V12H4Z"/></svg>
+        <span>Scheduling Lab</span>
+      </a>
+
+      <div class="nav-section-label" style="margin-top: 10px;">Diagnostics & Config</div>
+      <a class="nav-item" data-view="system">
+        <svg viewBox="0 0 16 16"><path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v12.5A1.75 1.75 0 0 1 14.25 16H1.75A1.75 1.75 0 0 1 0 14.25ZM1.75 1.5a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25V1.75a.25.25 0 0 0-.25-.25Zm6.5 2.5a.75.75 0 0 1 .75.75v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 .75-.75Zm0 6a.875.875 0 1 1 0 1.75.875.875 0 0 1 0-1.75Z"/></svg>
+        <span>System Explorer</span>
+      </a>
+      <a class="nav-item" data-view="settings">
+        <svg viewBox="0 0 16 16"><path d="M8 0a8.2 8.2 0 0 1 .701.031C9.444.095 9.99.645 10.16 1.29l.288 1.107c.377.098.733.25 1.066.446l1.043-.443c.621-.264 1.341-.034 1.714.542l.003.006.002.003 1.002 1.736c.381.658.214 1.493-.38 1.947l-.924.707c.045.385.045.777 0 1.162l.924.707c.594.454.761 1.289.38 1.947l-1.002 1.736-.002.003-.003.006c-.373.576-1.093.806-1.714.542l-1.043-.443a5.18 5.18 0 0 1-1.066.446l-.288 1.107c-.17.645-.716 1.195-1.459 1.259A8.32 8.32 0 0 1 8 16a8.2 8.2 0 0 1-.701-.031c-.743-.064-1.289-.614-1.459-1.259l-.288-1.107a5.18 5.18 0 0 1-1.066-.446l-1.043.443c-.621.264-1.341.034-1.714-.542l-.003-.006-.002-.003L.722 11.31c-.381-.658-.214-1.493.38-1.947l.924-.707a5.18 5.18 0 0 1 0-1.162l-.924-.707c-.594-.454-.761-1.289-.38-1.947l1.002-1.736.002-.003.003-.006c.373-.576 1.093-.806 1.714-.542l1.043.443c.333-.196.689-.348 1.066-.446l.288-1.107C6.01.645 6.556.095 7.299.031A8.32 8.32 0 0 1 8 0Zm0 5a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z"/></svg>
+        <span>Settings & Auth</span>
+      </a>
+    </div>
+
+    <div class="sidebar-footer">
+      <div id="sidebar-status-badge" class="status-badge connecting">
+        <span class="status-dot"></span>
+        <span id="sidebar-status-text">Connecting...</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- Main Content Wrapper -->
+  <div class="main-wrapper">
+    <!-- Topbar -->
+    <header class="topbar">
+      <div class="topbar-title-box">
+        <h1 id="topbar-view-title" class="topbar-title">Terminal Console</h1>
+      </div>
+      <div class="topbar-actions">
+        <span id="topbar-session-count" style="font-size: 0.8rem; color: var(--text-muted); font-family: var(--font-mono);">
+          0 sessions active
+        </span>
+        <button id="btn-quick-settings" class="btn btn-secondary btn-sm" onclick="app.switchView('settings')">
+          Auth Token
+        </button>
+      </div>
+    </header>
+
+    <!-- Scrollable Content Area -->
+    <div class="content-area">
+
+      <!-- ========================================================
+           1. TERMINAL VIEW
+           ======================================================== -->
+      <section id="view-terminal" class="view-panel active terminal-view">
+        <div class="terminal-header">
+          <div id="session-tabs-container" class="terminal-tabs">
+            <!-- Tabs added dynamically -->
+          </div>
+          <div class="term-actions">
+            <button id="btn-clear-term" class="btn btn-secondary btn-sm" title="Clear Screen">Clear</button>
+            <button id="btn-new-terminal" class="btn btn-primary btn-sm">
+              <span>+ New Session</span>
+            </button>
+          </div>
+        </div>
+        <div id="terminal-stage" class="terminal-stage">
+          <!-- Terminal instances render here -->
+        </div>
+      </section>
+
+      <!-- ========================================================
+           2. DASHBOARD VIEW
+           ======================================================== -->
+      <section id="view-dashboard" class="view-panel">
+        <div class="dashboard-container">
+          <div class="stats-grid">
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">CPU Utilization</span>
+                <svg class="card-icon" viewBox="0 0 16 16"><path fill="currentColor" d="M6 0h4v1.5H6Zm-4 4h12v1.5H2Zm0 3.5h12V9H2Zm0 3.5h12V13H2ZM6 14.5h4V16H6Z"/></svg>
+              </div>
+              <div id="dash-cpu-val" class="stat-num">0.0%</div>
+              <div class="progress-track">
+                <div id="dash-cpu-bar" class="progress-fill" style="width: 0%"></div>
+              </div>
+              <div class="stat-detail">Load Average: <span id="dash-load-val">-</span></div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">Memory Allocation</span>
+                <svg class="card-icon" viewBox="0 0 16 16"><path fill="currentColor" d="M2 2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V2Zm2-.5a.5.5 0 0 0-.5.5v12a.5.5 0 0 0 .5.5h8a.5.5 0 0 0 .5-.5V2a.5.5 0 0 0-.5-.5H4Z"/></svg>
+              </div>
+              <div id="dash-mem-val" class="stat-num">0.0%</div>
+              <div class="progress-track">
+                <div id="dash-mem-bar" class="progress-fill" style="width: 0%"></div>
+              </div>
+              <div id="dash-mem-desc" class="stat-detail">-</div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">Active Processes</span>
+                <svg class="card-icon" viewBox="0 0 16 16"><path fill="currentColor" d="M1.5 3A1.5 1.5 0 0 1 3 1.5h10A1.5 1.5 0 0 1 14.5 3v10a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 13Z"/></svg>
+              </div>
+              <div id="dash-proc-val" class="stat-num">0</div>
+              <div id="dash-proc-desc" class="stat-detail">Linux tasks monitored via /proc</div>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">Host System</span>
+                <svg class="card-icon" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0a8 8 0 1 0 0 16A8 8 0 0 0 8 0Z"/></svg>
+              </div>
+              <div id="dash-hostname" class="stat-num" style="font-size: 1.4rem;">Linux</div>
+              <div id="dash-os" class="stat-detail">-</div>
+              <div id="dash-uptime" class="stat-detail" style="margin-top: 2px;">-</div>
+            </div>
+          </div>
+
+          <!-- Quick Actions & Memory Detailed Breakdown -->
+          <div style="display: grid; grid-template-columns: 2fr 1fr; gap: 16px;">
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">Kernel & Memory Breakdown</span>
+              </div>
+              <table class="info-table">
+                <tbody>
+                  <tr><td>Operating System</td><td id="dash-detail-os">-</td></tr>
+                  <tr><td>Kernel Release</td><td id="dash-detail-kernel">-</td></tr>
+                  <tr><td>CPU Architecture</td><td id="dash-detail-arch">-</td></tr>
+                  <tr><td>CPU Cores Online</td><td id="dash-detail-cores">-</td></tr>
+                  <tr><td>Swap Memory</td><td id="dash-detail-swap">-</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="card" style="justify-content: center; align-items: center; text-align: center; gap: 14px;">
+              <div class="card-title">Interactive Terminal</div>
+              <p style="font-size: 0.85rem; color: var(--text-muted);">
+                Spawn isolated POSIX PTY sessions directly in the browser with full job control.
+              </p>
+              <button class="btn btn-primary" onclick="app.switchView('terminal'); app.createNewSession();">
+                Open New Terminal
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================================
+           3. PROCESS EXPLORER VIEW
+           ======================================================== -->
+      <section id="view-processes" class="view-panel">
+        <div class="process-container">
+          <div class="table-toolbar">
+            <div class="search-box">
+              <svg viewBox="0 0 16 16"><path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/></svg>
+              <input type="text" id="proc-search-input" placeholder="Search processes by PID or command...">
+            </div>
+
+            <div class="toolbar-controls">
+              <label style="font-size: 0.82rem; color: var(--text-muted);">Sort By:</label>
+              <select id="proc-sort-select" class="form-input" style="padding: 4px 8px; font-size: 0.82rem;">
+                <option value="cpu">CPU Utilization</option>
+                <option value="memory">Memory (RSS)</option>
+                <option value="pid">PID</option>
+                <option value="name">Process Name</option>
+              </select>
+              <button class="btn btn-secondary btn-sm" onclick="app.fetchProcesses()">Refresh</button>
+            </div>
+          </div>
+
+          <div class="table-card">
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>PID</th>
+                    <th>PPID</th>
+                    <th>Name</th>
+                    <th>State</th>
+                    <th>CPU %</th>
+                    <th>Resident Memory</th>
+                    <th>Threads</th>
+                    <th style="text-align: right;">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="proc-table-body">
+                  <!-- Populated dynamically -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================================
+           4. CPU SCHEDULING LAB VIEW
+           ======================================================== -->
+      <section id="view-scheduling" class="view-panel">
+        <div class="lab-container">
+          <div class="lab-topbar">
+            <div class="algo-chips">
+              <button class="chip-btn active" data-algo="fcfs">FCFS</button>
+              <button class="chip-btn" data-algo="sjf">SJF</button>
+              <button class="chip-btn" data-algo="rr">Round Robin</button>
+              <button class="chip-btn" data-algo="priority">Priority</button>
+              <button class="chip-btn" data-algo="mlfq">MLFQ</button>
+            </div>
+            <div style="display: flex; gap: 8px; align-items: center;">
+              <label style="font-size: 0.82rem; color: var(--text-muted);">Quantum (RR):</label>
+              <input type="number" id="sched-quantum-input" class="form-input" style="width: 58px; padding: 4px 6px; font-size: 0.82rem;" value="4" min="1" max="64">
+              <button id="btn-load-demo" class="btn btn-secondary btn-sm">Load Demo Workload</button>
+              <button id="btn-simulate" class="btn btn-primary btn-sm">Run Simulation</button>
+              <button id="btn-compare" class="btn btn-secondary btn-sm">Compare All 5</button>
+            </div>
+          </div>
+
+          <!-- Workload Process Table Builder -->
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Virtual Workload Processes</span>
+              <button id="btn-add-process" class="btn btn-secondary btn-sm">+ Add Process</button>
+            </div>
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width: 15%;">PID</th>
+                  <th style="width: 25%;">Arrival Time</th>
+                  <th style="width: 25%;">Burst Time</th>
+                  <th style="width: 25%;">Priority (1=High)</th>
+                  <th style="width: 10%; text-align: right;">Remove</th>
+                </tr>
+              </thead>
+              <tbody id="workload-tbody">
+                <!-- Dynamically populated -->
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Visual Gantt Chart & Metrics Output -->
+          <div id="sched-results-container" class="gantt-card">
+            <div class="card-header">
+              <span class="card-title">Simulation Output & Timeline</span>
+            </div>
+            <div style="color: var(--text-muted); font-size: 0.85rem; padding: 8px 0;">
+              Click <strong>"Run Simulation"</strong> or <strong>"Compare All 5"</strong> to execute OS scheduling algorithms on the workload above.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================================
+           5. SYSTEM EXPLORER VIEW
+           ======================================================== -->
+      <section id="view-system" class="view-panel">
+        <div class="dashboard-container">
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); gap: 16px;">
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">Linux Kernel & Architecture</span>
+              </div>
+              <table class="info-table">
+                <tbody>
+                  <tr><td>Operating System</td><td id="sys-os-name">-</td></tr>
+                  <tr><td>Kernel Version</td><td id="sys-kernel-ver">-</td></tr>
+                  <tr><td>Machine Architecture</td><td id="sys-arch">-</td></tr>
+                  <tr><td>CPUs Online</td><td id="sys-cpus-online">-</td></tr>
+                  <tr><td>CPUs Configured</td><td id="sys-cpus-conf">-</td></tr>
+                  <tr><td>/proc Status</td><td id="sys-proc-status">-</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="card">
+              <div class="card-header">
+                <span class="card-title">Shell Process Environment</span>
+              </div>
+              <table class="info-table">
+                <tbody>
+                  <tr><td>Server Shell PID</td><td id="sys-shell-pid">-</td></tr>
+                  <tr><td>Parent PID (PPID)</td><td id="sys-shell-ppid">-</td></tr>
+                  <tr><td>Process Group (PGID)</td><td id="sys-shell-pgid">-</td></tr>
+                  <tr><td>Session ID (SID)</td><td id="sys-shell-sid">-</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="card" style="grid-column: 1 / -1;">
+              <div class="card-header">
+                <span class="card-title">Hardware Memory Mapping (KiB)</span>
+              </div>
+              <table class="info-table">
+                <tbody>
+                  <tr><td>Total Physical RAM</td><td id="sys-mem-total">-</td></tr>
+                  <tr><td>Available Memory</td><td id="sys-mem-avail">-</td></tr>
+                  <tr><td>Free Memory</td><td id="sys-mem-free">-</td></tr>
+                  <tr><td>Kernel Buffers</td><td id="sys-mem-buffers">-</td></tr>
+                  <tr><td>Page Cache</td><td id="sys-mem-cached">-</td></tr>
+                  <tr><td>Total Swap</td><td id="sys-mem-swap-total">-</td></tr>
+                  <tr><td>Free Swap</td><td id="sys-mem-swap-free">-</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================================================
+           6. SETTINGS & AUTH VIEW
+           ======================================================== -->
+      <section id="view-settings" class="view-panel">
+        <div class="dashboard-container" style="max-width: 800px;">
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Bearer Token Authentication</span>
+            </div>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">
+              All SmartShell REST and WebSocket endpoints require a 256-bit hexadecimal Bearer token generated on startup.
+            </p>
+            <div class="form-group" style="margin-top: 10px;">
+              <label class="form-label">Access Token (Hexadecimal)</label>
+              <input type="password" id="auth-token-input" class="form-input" placeholder="Paste 64-character token">
+            </div>
+            <div style="display: flex; gap: 10px;">
+              <button id="btn-save-token" class="btn btn-primary">Verify & Save Token</button>
+              <button id="btn-clear-token" class="btn btn-danger">Logout / Clear Token</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <span class="card-title">Automated One-Click Launch</span>
+            </div>
+            <p style="font-size: 0.85rem; color: var(--text-muted);">
+              You can bookmark or launch the interface with the token in the URL query parameter:
+            </p>
+            <pre style="background: var(--bg-input); padding: 10px 14px; border-radius: var(--radius-md); font-family: var(--font-mono); font-size: 0.82rem; color: var(--accent-cyan); overflow-x: auto; border: 1px solid var(--border);">http://127.0.0.1:8080/?token=&lt;YOUR_TOKEN&gt;</pre>
+            <p style="font-size: 0.8rem; color: var(--text-faint); margin-top: 6px;">
+              Token is located at <code>~/.smartshell/session.token</code> on the server machine.
+            </p>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- Process Details Modal -->
+  <div id="proc-modal" class="modal-overlay">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3 id="modal-proc-title" class="modal-title">Process Details</h3>
+        <button class="btn btn-secondary btn-sm" onclick="app.closeProcModal()">&times;</button>
+      </div>
+      <div id="modal-proc-content">
+        <!-- Loaded via /api/processes/:pid -->
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <!-- Application Scripts -->
+  <script src="js/api.js"></script>
+  <script src="js/terminal.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>

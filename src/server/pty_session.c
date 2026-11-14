@@ -27,6 +27,8 @@
 #include <poll.h>
 #include <pthread.h>
 #include <dirent.h>
+#include <stdatomic.h>
+#include <sys/syscall.h>
 
 /* Global PTY Manager State */
 static pty_session_t    g_sessions[PTY_MAX_SESSIONS];
@@ -160,80 +162,328 @@ void pty_manager_shutdown(void)
     pthread_mutex_unlock(&g_manager_lock);
 }
 
-#define MAX_PENDING_WS 32
+typedef enum {
+    WS_STATE_FREE = 0,
+    WS_STATE_UNCONFIRMED,   /* ws_connect_handler accepted; awaiting ws_ready_handler */
+    WS_STATE_PENDING_AUTH,  /* ws_ready_handler fired; awaiting first auth message */
+    WS_STATE_AUTHENTICATED, /* Auth succeeded; bound to a PTY session */
+    WS_STATE_CLOSING,       /* close_requested set; worker thread will exit */
+    WS_STATE_RELEASING      /* ws_close_handler + connection_close fired; awaiting refcount 0 */
+} ws_state_t;
 
-static struct {
+typedef struct {
+    ws_state_t state;
+    uint32_t generation;
+    atomic_int ref_count;
+    atomic_bool close_requested;
+
+    uint64_t lease_id;
+    struct mg_connection *conn;
+
+    /* Timeout deadlines (CLOCK_MONOTONIC) */
+    struct timespec handshake_deadline;  /* Valid in UNCONFIRMED */
+    struct timespec auth_deadline;       /* Valid in PENDING_AUTH */
+
+    char session_id[PTY_SESSION_ID_HEX_LEN + 1];
+} ws_registry_entry_t;
+
+typedef struct {
     pthread_mutex_t lock;
-    struct mg_connection *conns[MAX_PENDING_WS];
-    time_t connected_at[MAX_PENDING_WS];
-    int count;
-} g_pending_auth = {
+    int live_ws_count;
+    int pending_auth_count;
+    uint32_t next_generation;
+    ws_registry_entry_t entries[MAX_LIVE_WS];
+} ws_registry_t;
+
+static ws_registry_t g_ws_registry = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
-    .count = 0
+    .live_ws_count = 0,
+    .pending_auth_count = 0,
+    .next_generation = 0
 };
+
+static inline bool timespec_ge(struct timespec a, struct timespec b)
+{
+    if (a.tv_sec > b.tv_sec) return true;
+    if (a.tv_sec == b.tv_sec && a.tv_nsec >= b.tv_nsec) return true;
+    return false;
+}
+
+static void pty_admission_release_ref(uint32_t slot, uint32_t generation)
+{
+    if (slot >= MAX_LIVE_WS) return;
+
+    ws_registry_entry_t *entry = &g_ws_registry.entries[slot];
+    int prev = atomic_fetch_sub(&entry->ref_count, 1);
+
+    if (prev == 1) {
+        /* Last reference dropped. Reclaim slot. */
+        pthread_mutex_lock(&g_ws_registry.lock);
+        if (entry->generation == generation &&
+            entry->state == WS_STATE_RELEASING) {
+            entry->state = WS_STATE_FREE;
+            entry->lease_id = 0;
+            entry->conn = NULL;
+            entry->session_id[0] = '\0';
+            atomic_store(&entry->close_requested, false);
+        }
+        pthread_mutex_unlock(&g_ws_registry.lock);
+    }
+}
+
+int pty_admission_reserve(struct mg_connection *conn, ws_conn_ctx_t *ctx)
+{
+    if (conn == NULL || ctx == NULL) return -1;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    pthread_mutex_lock(&g_ws_registry.lock);
+
+    if (g_ws_registry.live_ws_count >= MAX_LIVE_WS ||
+        g_ws_registry.pending_auth_count >= MAX_PENDING_WS) {
+        pthread_mutex_unlock(&g_ws_registry.lock);
+        return -1;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < MAX_LIVE_WS; i++) {
+        if (g_ws_registry.entries[i].state == WS_STATE_FREE &&
+            atomic_load(&g_ws_registry.entries[i].ref_count) == 0) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot == -1) {
+        pthread_mutex_unlock(&g_ws_registry.lock);
+        return -1;
+    }
+
+    ws_registry_entry_t *entry = &g_ws_registry.entries[slot];
+
+    if (++g_ws_registry.next_generation == 0)
+        g_ws_registry.next_generation = 1;
+
+    entry->generation = g_ws_registry.next_generation;
+    entry->lease_id = ((uint64_t)entry->generation << 32) | (uint32_t)slot;
+    entry->conn = conn;
+    entry->state = WS_STATE_UNCONFIRMED;
+    entry->session_id[0] = '\0';
+    entry->handshake_deadline.tv_sec = now.tv_sec + 5;
+    entry->handshake_deadline.tv_nsec = now.tv_nsec;
+    atomic_store(&entry->ref_count, 1);         /* Connection lifetime reference */
+    atomic_store(&entry->close_requested, false);
+
+    g_ws_registry.live_ws_count++;
+    g_ws_registry.pending_auth_count++;
+
+    ctx->lease_id = entry->lease_id;
+
+    pthread_mutex_unlock(&g_ws_registry.lock);
+    return 0;
+}
+
+int pty_admission_confirm(uint64_t lease_id)
+{
+    uint32_t slot = (uint32_t)(lease_id & 0xFFFFFFFF);
+    uint32_t gen  = (uint32_t)(lease_id >> 32);
+    if (slot >= MAX_LIVE_WS) return -1;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    pthread_mutex_lock(&g_ws_registry.lock);
+    ws_registry_entry_t *entry = &g_ws_registry.entries[slot];
+
+    if (entry->generation != gen || entry->state != WS_STATE_UNCONFIRMED) {
+        pthread_mutex_unlock(&g_ws_registry.lock);
+        return -1;
+    }
+
+    entry->state = WS_STATE_PENDING_AUTH;
+    entry->auth_deadline.tv_sec = now.tv_sec + WS_AUTH_TIMEOUT_SEC;
+    entry->auth_deadline.tv_nsec = now.tv_nsec;
+
+    pthread_mutex_unlock(&g_ws_registry.lock);
+    return 0;
+}
+
+int pty_admission_authenticate(uint64_t lease_id, const char *session_id)
+{
+    uint32_t slot = (uint32_t)(lease_id & 0xFFFFFFFF);
+    uint32_t gen  = (uint32_t)(lease_id >> 32);
+    if (slot >= MAX_LIVE_WS || session_id == NULL) return -1;
+
+    pthread_mutex_lock(&g_ws_registry.lock);
+    ws_registry_entry_t *entry = &g_ws_registry.entries[slot];
+
+    if (entry->generation != gen || entry->state != WS_STATE_PENDING_AUTH) {
+        pthread_mutex_unlock(&g_ws_registry.lock);
+        return -1;
+    }
+
+    entry->state = WS_STATE_AUTHENTICATED;
+    strncpy(entry->session_id, session_id, sizeof(entry->session_id) - 1);
+    entry->session_id[sizeof(entry->session_id) - 1] = '\0';
+    g_ws_registry.pending_auth_count--;
+
+    pthread_mutex_unlock(&g_ws_registry.lock);
+    return 0;
+}
+
+void pty_admission_request_close(uint64_t lease_id)
+{
+    uint32_t slot = (uint32_t)(lease_id & 0xFFFFFFFF);
+    uint32_t gen  = (uint32_t)(lease_id >> 32);
+    if (slot >= MAX_LIVE_WS) return;
+
+    pthread_mutex_lock(&g_ws_registry.lock);
+    ws_registry_entry_t *entry = &g_ws_registry.entries[slot];
+
+    if (entry->generation != gen ||
+        entry->state == WS_STATE_FREE ||
+        entry->state == WS_STATE_RELEASING) {
+        pthread_mutex_unlock(&g_ws_registry.lock);
+        return;
+    }
+
+    atomic_store(&entry->close_requested, true);
+
+    if (entry->state == WS_STATE_UNCONFIRMED ||
+        entry->state == WS_STATE_PENDING_AUTH) {
+        g_ws_registry.pending_auth_count--;
+        entry->state = WS_STATE_CLOSING;
+    } else if (entry->state == WS_STATE_AUTHENTICATED) {
+        entry->state = WS_STATE_CLOSING;
+    }
+
+    pthread_mutex_unlock(&g_ws_registry.lock);
+}
+
+bool pty_admission_is_close_requested(uint64_t lease_id)
+{
+    if (lease_id == 0) return false;
+    uint32_t slot = (uint32_t)(lease_id & 0xFFFFFFFF);
+    uint32_t gen  = (uint32_t)(lease_id >> 32);
+    if (slot >= MAX_LIVE_WS) return false;
+
+    ws_registry_entry_t *entry = &g_ws_registry.entries[slot];
+    if (entry->generation != gen) return false;
+    return atomic_load(&entry->close_requested);
+}
+
+uint64_t pty_admission_find_lease_by_conn(const struct mg_connection *conn)
+{
+    if (conn == NULL) return 0;
+    uint64_t lease_id = 0;
+    pthread_mutex_lock(&g_ws_registry.lock);
+    for (int i = 0; i < MAX_LIVE_WS; i++) {
+        if (g_ws_registry.entries[i].conn == conn &&
+            g_ws_registry.entries[i].state != WS_STATE_FREE &&
+            g_ws_registry.entries[i].state != WS_STATE_RELEASING) {
+            lease_id = g_ws_registry.entries[i].lease_id;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_ws_registry.lock);
+    return lease_id;
+}
+
+void pty_admission_release_lease(uint64_t lease_id)
+{
+    if (lease_id == 0) return;
+    uint32_t slot = (uint32_t)(lease_id & 0xFFFFFFFF);
+    uint32_t gen  = (uint32_t)(lease_id >> 32);
+
+    if (slot < MAX_LIVE_WS) {
+        pthread_mutex_lock(&g_ws_registry.lock);
+        ws_registry_entry_t *entry = &g_ws_registry.entries[slot];
+
+        if (entry->generation == gen &&
+            entry->state != WS_STATE_FREE &&
+            entry->state != WS_STATE_RELEASING) {
+
+            if (entry->state == WS_STATE_UNCONFIRMED ||
+                entry->state == WS_STATE_PENDING_AUTH) {
+                g_ws_registry.pending_auth_count--;
+            }
+
+            g_ws_registry.live_ws_count--;
+            entry->conn = NULL;
+            entry->state = WS_STATE_RELEASING;
+        }
+
+        pthread_mutex_unlock(&g_ws_registry.lock);
+
+        pty_admission_release_ref(slot, gen);
+    }
+}
+
+void pty_admission_on_connection_close(const struct mg_connection *conn)
+{
+    if (conn == NULL) return;
+
+    ws_conn_ctx_t *ctx = (ws_conn_ctx_t *)mg_get_user_connection_data(conn);
+    if (ctx == NULL) return;
+
+    if (ctx->lease_id != 0) {
+        pty_admission_release_lease(ctx->lease_id);
+    }
+
+    free(ctx);
+}
+
+void pty_admission_check_timeouts(void)
+{
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+
+    uint64_t expired[MAX_LIVE_WS];
+    int expired_count = 0;
+
+    pthread_mutex_lock(&g_ws_registry.lock);
+    for (int i = 0; i < MAX_LIVE_WS; i++) {
+        ws_registry_entry_t *entry = &g_ws_registry.entries[i];
+
+        if (entry->state == WS_STATE_UNCONFIRMED) {
+            if (timespec_ge(now, entry->handshake_deadline)) {
+                expired[expired_count++] = entry->lease_id;
+            }
+        } else if (entry->state == WS_STATE_PENDING_AUTH) {
+            if (timespec_ge(now, entry->auth_deadline)) {
+                expired[expired_count++] = entry->lease_id;
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_ws_registry.lock);
+
+    for (int i = 0; i < expired_count; i++) {
+        pty_admission_request_close(expired[i]);
+    }
+}
+
+int pty_admission_get_counts(int *live_count, int *pending_count)
+{
+    pthread_mutex_lock(&g_ws_registry.lock);
+    if (live_count) *live_count = g_ws_registry.live_ws_count;
+    if (pending_count) *pending_count = g_ws_registry.pending_auth_count;
+    pthread_mutex_unlock(&g_ws_registry.lock);
+    return 0;
+}
 
 void pty_session_add_pending_auth(struct mg_connection *conn)
 {
-    if (conn == NULL) return;
-    pthread_mutex_lock(&g_pending_auth.lock);
-    if (g_pending_auth.count < MAX_PENDING_WS) {
-        g_pending_auth.conns[g_pending_auth.count] = conn;
-        g_pending_auth.connected_at[g_pending_auth.count] = time(NULL);
-        g_pending_auth.count++;
-    }
-    pthread_mutex_unlock(&g_pending_auth.lock);
+    (void)conn;
 }
 
 void pty_session_remove_pending_auth(const struct mg_connection *conn)
 {
-    if (conn == NULL) return;
-    pthread_mutex_lock(&g_pending_auth.lock);
-    for (int i = 0; i < g_pending_auth.count; i++) {
-        if (g_pending_auth.conns[i] == conn) {
-            g_pending_auth.conns[i] = g_pending_auth.conns[g_pending_auth.count - 1];
-            g_pending_auth.connected_at[i] = g_pending_auth.connected_at[g_pending_auth.count - 1];
-            g_pending_auth.count--;
-            break;
-        }
-    }
-    pthread_mutex_unlock(&g_pending_auth.lock);
+    (void)conn;
 }
 
 void pty_session_check_auth_timeouts(void)
 {
-    time_t now = time(NULL);
-    struct mg_connection *to_close[MAX_PENDING_WS];
-    int num_to_close = 0;
-
-    pthread_mutex_lock(&g_pending_auth.lock);
-    int i = 0;
-    while (i < g_pending_auth.count) {
-        if ((now - g_pending_auth.connected_at[i]) >= WS_AUTH_TIMEOUT_SEC) {
-            to_close[num_to_close++] = g_pending_auth.conns[i];
-            g_pending_auth.conns[i] = g_pending_auth.conns[g_pending_auth.count - 1];
-            g_pending_auth.connected_at[i] = g_pending_auth.connected_at[g_pending_auth.count - 1];
-            g_pending_auth.count--;
-        } else {
-            i++;
-        }
-    }
-    pthread_mutex_unlock(&g_pending_auth.lock);
-
-    for (int j = 0; j < num_to_close; j++) {
-        cJSON *err = cJSON_CreateObject();
-        if (err != NULL) {
-            cJSON_AddStringToObject(err, "type", "error");
-            cJSON_AddStringToObject(err, "message", "authentication timeout");
-            char *json = cJSON_PrintUnformatted(err);
-            cJSON_Delete(err);
-            if (json != NULL) {
-                mg_websocket_write(to_close[j], MG_WEBSOCKET_OPCODE_TEXT, json, strlen(json));
-                free(json);
-            }
-        }
-        mg_websocket_write(to_close[j], MG_WEBSOCKET_OPCODE_CONNECTION_CLOSE, NULL, 0);
-        mg_close_connection(to_close[j]);
-    }
+    pty_admission_check_timeouts();
 }
 
 static void pty_session_append_output(pty_session_t *s, const char *data, size_t len)
@@ -324,28 +574,97 @@ static void pty_ws_send_exit(struct mg_connection *conn, int exit_code)
     }
 }
 
+#if defined(__linux__) && defined(__NR_pidfd_open) && defined(__NR_pidfd_send_signal)
+typedef enum {
+    PIDFD_RESULT_SENT,         /* Signal delivered to the correct process */
+    PIDFD_RESULT_ALREADY_DEAD, /* Process already exited (ESRCH) */
+    PIDFD_RESULT_SENT_UNSAFE,  /* Signal sent via kill(); PID reuse possible */
+    PIDFD_RESULT_FAILED        /* Signal could not be sent */
+} pidfd_result_t;
+
+static pidfd_result_t safe_kill_process(pid_t pid, int sig)
+{
+    int pfd = (int)syscall(__NR_pidfd_open, pid, 0);
+    if (pfd >= 0) {
+        int ret = (int)syscall(__NR_pidfd_send_signal, pfd, sig, NULL, 0);
+        int saved_errno = errno;
+        close(pfd);
+        if (ret == 0) return PIDFD_RESULT_SENT;
+        if (saved_errno == ESRCH) return PIDFD_RESULT_ALREADY_DEAD;
+        return PIDFD_RESULT_FAILED;
+    }
+
+    switch (errno) {
+    case ESRCH:
+        return PIDFD_RESULT_ALREADY_DEAD;
+
+    case ENOSYS:
+        /* Kernel does not support pidfd_open (pre-5.3 compatibility fallback) */
+        break;
+
+    case EMFILE:
+    case ENFILE:
+        fprintf(stderr,
+                "WARNING: pidfd_open(%d) failed: fd limit (%s); "
+                "skipping signal %d to avoid PID reuse risk\n",
+                (int)pid, strerror(errno), sig);
+        return PIDFD_RESULT_FAILED;
+
+    case EPERM:
+        fprintf(stderr,
+                "WARNING: pidfd_open(%d) failed: EPERM; skipping signal %d\n",
+                (int)pid, sig);
+        return PIDFD_RESULT_FAILED;
+
+    default:
+        fprintf(stderr,
+                "WARNING: pidfd_open(%d) failed: %s; skipping signal %d\n",
+                (int)pid, strerror(errno), sig);
+        return PIDFD_RESULT_FAILED;
+    }
+
+    if (kill(pid, sig) == 0) return PIDFD_RESULT_SENT_UNSAFE;
+    if (errno == ESRCH) return PIDFD_RESULT_ALREADY_DEAD;
+    return PIDFD_RESULT_FAILED;
+}
+#else
+static int safe_kill_process(pid_t pid, int sig)
+{
+    return kill(pid, sig);
+}
+#endif
+
 /*
  * Kill any surviving descendant processes that belong to the PTY session.
  * Reads /proc to find processes whose session ID (SID) matches sid.
+ * Uses bounded 3-pass sweep with pidfd verification where available.
  */
 static void pty_kill_session_descendants(pid_t sid)
 {
     if (sid <= 1) return;
 
-    DIR *dir = opendir("/proc");
-    if (dir == NULL) return;
+    for (int pass = 0; pass < 3; pass++) {
+        DIR *dir = opendir("/proc");
+        if (dir == NULL) return;
 
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
-        pid_t p = (pid_t)atoi(ent->d_name);
-        if (p > 1 && p != getpid()) {
-            if (getsid(p) == sid) {
-                kill(p, SIGKILL);
+        int found_count = 0;
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL) {
+            if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+            pid_t p = (pid_t)atoi(ent->d_name);
+            if (p > 1 && p != getpid()) {
+                if (getsid(p) == sid) {
+                    safe_kill_process(p, SIGKILL);
+                    found_count++;
+                }
             }
         }
+        closedir(dir);
+        if (found_count == 0) {
+            break;
+        }
+        usleep(5000); /* 5ms backoff before next pass */
     }
-    closedir(dir);
 }
 
 /*
@@ -353,7 +672,8 @@ static void pty_kill_session_descendants(pid_t sid)
  *
  * Sends SIGHUP to the child process group and child PID, waits up to 50ms,
  * and escalates to SIGKILL if the child ignores SIGHUP or remains alive.
- * Always reaps with waitpid() and sets child_pid to -1.
+ * Reaps with non-blocking waitpid(WNOHANG) and preserves child_pid for
+ * quarantine if child cannot be reaped immediately.
  * Must be called with s->lock held.
  */
 static void pty_session_reap_child_locked(pty_session_t *s, bool send_signals)
@@ -410,20 +730,42 @@ static void pty_session_reap_child_locked(pty_session_t *s, bool send_signals)
         }
 
         if (!reaped) {
-            waitpid(pid, &status, 0);
+            /* Final non-blocking poll */
+            pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid) {
+                reaped = true;
+            }
         }
     }
 
-    if (WIFEXITED(status)) {
-        s->exit_code = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-        s->exit_code = 128 + WTERMSIG(status);
+    if (reaped) {
+        if (WIFEXITED(status)) {
+            s->exit_code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            s->exit_code = 128 + WTERMSIG(status);
+        }
+        s->child_pid = -1;
+        pty_kill_session_descendants(pid);
+    } else {
+        /* Non-blocking timeout: inspect /proc/<pid>/stat for diagnostics */
+        char state_char = '?';
+        char stat_path[64];
+        snprintf(stat_path, sizeof(stat_path), "/proc/%d/stat", (int)pid);
+        FILE *fp = fopen(stat_path, "r");
+        if (fp != NULL) {
+            int p;
+            char comm[256];
+            if (fscanf(fp, "%d %s %c", &p, comm, &state_char) != 3) {
+                state_char = '?';
+            }
+            fclose(fp);
+        }
+        /* Child remains unreaped: preserve s->child_pid for background polling */
+        s->exit_code = 137; /* 128 + SIGKILL */
+        fprintf(stderr,
+                "WARNING: PTY session %s child PID %d failed to exit after SIGKILL (state: %c); slot quarantined.\n",
+                s->session_id, (int)pid, state_char);
     }
-
-    s->child_pid = -1;
-
-    /* Clean up any detached or background descendant processes belonging to the session */
-    pty_kill_session_descendants(pid);
 }
 
 static void pty_session_do_terminate_locked(pty_session_t *s)
@@ -441,11 +783,13 @@ static void pty_session_do_terminate_locked(pty_session_t *s)
         s->master_fd = -1;
     }
 
-    /* Send exit notification to WebSocket client if active, and close connection */
+    /* Send exit notification to WebSocket client if active, and request closure */
     if (s->conn != NULL) {
+        uint64_t lease = pty_admission_find_lease_by_conn(s->conn);
+        if (lease != 0) {
+            pty_admission_request_close(lease);
+        }
         pty_ws_send_exit(s->conn, s->exit_code);
-        mg_websocket_write(s->conn, MG_WEBSOCKET_OPCODE_CONNECTION_CLOSE, NULL, 0);
-        mg_close_connection(s->conn);
         s->conn = NULL;
     }
 
@@ -459,7 +803,7 @@ pty_session_t *pty_session_create(unsigned short cols, unsigned short rows)
     /* Find free slot */
     pty_session_t *slot = NULL;
     for (int i = 0; i < PTY_MAX_SESSIONS; i++) {
-        if (!g_sessions[i].in_use) {
+        if (!g_sessions[i].in_use && g_sessions[i].child_pid <= 0) {
             slot = &g_sessions[i];
             break;
         }
@@ -720,13 +1064,18 @@ void pty_session_attach_conn(pty_session_t *session, struct mg_connection *conn)
         struct mg_connection *old_conn = session->conn;
 
         /* Invalidate old connection user data so it cannot send further commands */
-        ws_conn_data_t *old_cd = (ws_conn_data_t *)mg_get_user_connection_data(old_conn);
+        ws_conn_ctx_t *old_cd = (ws_conn_ctx_t *)mg_get_user_connection_data(old_conn);
         if (old_cd != NULL) {
             old_cd->authenticated = false;
             old_cd->session_id[0] = '\0';
         }
 
-        /* Send error and close frame to old connection */
+        uint64_t old_lease = pty_admission_find_lease_by_conn(old_conn);
+        if (old_lease != 0) {
+            pty_admission_request_close(old_lease);
+        }
+
+        /* Send error to old connection */
         cJSON *err_msg = cJSON_CreateObject();
         if (err_msg != NULL) {
             cJSON_AddStringToObject(err_msg, "type", "error");
@@ -738,8 +1087,6 @@ void pty_session_attach_conn(pty_session_t *session, struct mg_connection *conn)
                 free(err_str);
             }
         }
-        mg_websocket_write(old_conn, MG_WEBSOCKET_OPCODE_CONNECTION_CLOSE, NULL, 0);
-        mg_close_connection(old_conn);
     }
 
     session->conn = conn;
@@ -841,7 +1188,9 @@ int pty_session_delete(const char *session_id)
 
     pthread_mutex_lock(&target->lock);
     pty_session_do_terminate_locked(target);
-    target->in_use = false;
+    if (target->child_pid <= 0) {
+        target->in_use = false;
+    }
     pthread_mutex_unlock(&target->lock);
 
     wakeup_reader_thread();
@@ -896,6 +1245,18 @@ static void *pty_reader_thread_func(void *arg)
 
             pthread_mutex_lock(&s->lock);
 
+            /* Retry reaping any quarantined child processes */
+            if (s->status == PTY_STATUS_TERMINATED && s->child_pid > 0) {
+                int q_status = 0;
+                pid_t waited = waitpid(s->child_pid, &q_status, WNOHANG);
+                if (waited == s->child_pid) {
+                    pid_t old_pid = s->child_pid;
+                    s->child_pid = -1;
+                    pty_kill_session_descendants(old_pid);
+                    s->in_use = false;
+                }
+            }
+
             /* Check disconnect grace period expiry */
             if (s->status == PTY_STATUS_DISCONNECTED && s->disconnected_at > 0) {
                 if ((now - s->disconnected_at) >= g_grace_period_sec) {
@@ -930,7 +1291,7 @@ static void *pty_reader_thread_func(void *arg)
         }
 
         /* Check for unauthenticated WebSocket connection timeouts */
-        pty_session_check_auth_timeouts();
+        pty_admission_check_timeouts();
 
         /* Drain wakeup pipe if signaled */
         if (pfds[0].revents & POLLIN) {

@@ -777,30 +777,38 @@ static int ws_terminal_connect(const struct mg_connection *conn, void *cbdata)
      * All authentication happens strictly via the in-band first message.
      */
 
+    /* Allocate connection context and reserve admission slot */
+    ws_conn_ctx_t *ctx = calloc(1, sizeof(ws_conn_ctx_t));
+    if (ctx == NULL) {
+        send_ws_handshake_error((struct mg_connection *)conn, 503, "out of memory");
+        return 1;
+    }
+    if (pty_admission_reserve((struct mg_connection *)conn, ctx) < 0) {
+        free(ctx);
+        send_ws_handshake_error((struct mg_connection *)conn, 503, "server capacity exceeded");
+        return 1;
+    }
+    mg_set_user_connection_data((struct mg_connection *)conn, ctx);
+
     return 0; /* Accept connection */
 }
 
 /*
  * WebSocket ready handler — called after successful handshake.
- * Allocates per-connection state and begins auth timeout window.
+ * Confirms admission reservation and establishes auth timeout window.
  */
 static void ws_terminal_ready(struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
-    ws_conn_data_t *cd = calloc(1, sizeof(ws_conn_data_t));
+    ws_conn_ctx_t *cd = (ws_conn_ctx_t *)mg_get_user_connection_data(conn);
     if (cd == NULL) {
-        /* Can't allocate state — close connection immediately */
         return;
     }
     cd->authenticated = false;
     cd->session_id[0] = '\0';
-    cd->connected_at = time(NULL);
-    cd->conn = conn;
+    clock_gettime(CLOCK_MONOTONIC, &cd->connected_at);
 
-    mg_set_user_connection_data(conn, cd);
-
-    /* Track pending unauthenticated connection for timeout enforcement */
-    pty_session_add_pending_auth(conn);
+    pty_admission_confirm(cd->lease_id);
 }
 
 /*
@@ -831,8 +839,13 @@ static int ws_terminal_data(struct mg_connection *conn, int bits,
         return 0;
     }
 
-    ws_conn_data_t *cd = (ws_conn_data_t *)mg_get_user_connection_data(conn);
+    ws_conn_ctx_t *cd = (ws_conn_ctx_t *)mg_get_user_connection_data(conn);
     if (cd == NULL) {
+        return 0;
+    }
+
+    /* Check if close was requested by sweeper or session termination */
+    if (cd->lease_id != 0 && pty_admission_is_close_requested(cd->lease_id)) {
         return 0;
     }
 
@@ -862,8 +875,10 @@ static int ws_terminal_data(struct mg_connection *conn, int bits,
 
     /* --- Authentication (must be first message) --- */
     if (!cd->authenticated) {
-        /* Check authentication timeout */
-        if ((time(NULL) - cd->connected_at) >= WS_AUTH_TIMEOUT_SEC) {
+        /* Check authentication timeout using CLOCK_MONOTONIC */
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if ((now.tv_sec - cd->connected_at.tv_sec) >= WS_AUTH_TIMEOUT_SEC) {
             cJSON_Delete(msg);
             ws_send_error(conn, "authentication timeout");
             return 0;
@@ -890,11 +905,13 @@ static int ws_terminal_data(struct mg_connection *conn, int bits,
         }
 
         /* Authentication succeeded */
-        pty_session_remove_pending_auth(conn);
-
         strncpy(cd->session_id, sid->valuestring, PTY_SESSION_ID_HEX_LEN);
         cd->session_id[PTY_SESSION_ID_HEX_LEN] = '\0';
         cd->authenticated = true;
+
+        if (cd->lease_id != 0) {
+            pty_admission_authenticate(cd->lease_id, cd->session_id);
+        }
 
         pty_session_t *session = pty_session_find(cd->session_id);
         if (session != NULL) {
@@ -956,14 +973,14 @@ static int ws_terminal_data(struct mg_connection *conn, int bits,
 
 /*
  * WebSocket close handler — called when connection closes.
- * Detaches from PTY session and frees per-connection state.
+ * Detaches from PTY session and requests registry entry transition.
+ * Note: cd is not freed here; callbacks.connection_close (pty_admission_on_connection_close)
+ * reclaims registry resources and frees cd.
  */
 static void ws_terminal_close(const struct mg_connection *conn, void *cbdata)
 {
     (void)cbdata;
-    pty_session_remove_pending_auth(conn);
-
-    ws_conn_data_t *cd = (ws_conn_data_t *)mg_get_user_connection_data(conn);
+    ws_conn_ctx_t *cd = (ws_conn_ctx_t *)mg_get_user_connection_data(conn);
     if (cd == NULL) return;
 
     if (cd->authenticated && cd->session_id[0] != '\0') {
@@ -973,8 +990,9 @@ static void ws_terminal_close(const struct mg_connection *conn, void *cbdata)
         }
     }
 
-    free(cd);
-    mg_set_user_connection_data(conn, NULL);
+    if (cd->lease_id != 0) {
+        pty_admission_request_close(cd->lease_id);
+    }
 }
 
 /* ---- Terminal Session REST Endpoints ----------------------------------- */
@@ -1371,23 +1389,29 @@ int server_start(const server_config_t *config)
              config->bind_address ? config->bind_address : HTTP_DEFAULT_BIND_ADDR,
              config->port);
 
-    const char *civetweb_options[16];
+    const char *civetweb_options[20];
     int opt_idx = 0;
     civetweb_options[opt_idx++] = "listening_ports";
     civetweb_options[opt_idx++] = port_str;
     civetweb_options[opt_idx++] = "num_threads";
-    civetweb_options[opt_idx++] = "4";
+    civetweb_options[opt_idx++] = "24";
     civetweb_options[opt_idx++] = "request_timeout_ms";
     civetweb_options[opt_idx++] = "5000";
     civetweb_options[opt_idx++] = "websocket_timeout_ms";
     civetweb_options[opt_idx++] = "5000";
+    civetweb_options[opt_idx++] = "enable_websocket_ping_pong";
+    civetweb_options[opt_idx++] = "yes";
     civetweb_options[opt_idx++] = "enable_keep_alive";
     civetweb_options[opt_idx++] = "yes";
     civetweb_options[opt_idx++] = "keep_alive_timeout_ms";
     civetweb_options[opt_idx++] = "5000";
-    if (config->document_root != NULL) {
+    const char *doc_root = config->document_root;
+    if (doc_root == NULL && access("web", F_OK) == 0) {
+        doc_root = "web";
+    }
+    if (doc_root != NULL) {
         civetweb_options[opt_idx++] = "document_root";
-        civetweb_options[opt_idx++] = config->document_root;
+        civetweb_options[opt_idx++] = doc_root;
     }
     civetweb_options[opt_idx] = NULL;
 
@@ -1408,6 +1432,7 @@ int server_start(const server_config_t *config)
     /* Start CivetWeb server */
     struct mg_callbacks callbacks;
     memset(&callbacks, 0, sizeof(callbacks));
+    callbacks.connection_close = pty_admission_on_connection_close;
 
     g_ctx = mg_start(&callbacks, NULL, civetweb_options);
     if (g_ctx == NULL) {

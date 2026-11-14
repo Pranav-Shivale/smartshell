@@ -277,6 +277,147 @@ static void test_pty_shutdown_multiple_sessions_and_descendants(void)
     }
 }
 
+static void test_pty_admission_capacity_and_limits(void)
+{
+    int live = -1, pending = -1;
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(0, live);
+    ASSERT_EQ_INT(0, pending);
+
+    ws_conn_ctx_t ctxs[MAX_LIVE_WS + 2];
+    memset(ctxs, 0, sizeof(ctxs));
+
+    /* Reserve up to MAX_PENDING_WS (8) */
+    for (int i = 0; i < MAX_PENDING_WS; i++) {
+        ASSERT_EQ_INT(0, pty_admission_reserve((struct mg_connection *)(uintptr_t)(i + 1), &ctxs[i]));
+        ASSERT_TRUE(ctxs[i].lease_id != 0);
+    }
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(MAX_PENDING_WS, live);
+    ASSERT_EQ_INT(MAX_PENDING_WS, pending);
+
+    /* 9th unconfirmed connection must be rejected due to pending auth capacity limit */
+    ws_conn_ctx_t overflow_ctx;
+    memset(&overflow_ctx, 0, sizeof(overflow_ctx));
+    ASSERT_EQ_INT(-1, pty_admission_reserve((struct mg_connection *)(uintptr_t)999, &overflow_ctx));
+    ASSERT_EQ_INT(0, (int)overflow_ctx.lease_id);
+
+    /* Confirm and authenticate all 8 pending connections */
+    for (int i = 0; i < MAX_PENDING_WS; i++) {
+        ASSERT_EQ_INT(0, pty_admission_confirm(ctxs[i].lease_id));
+        ASSERT_EQ_INT(0, pty_admission_authenticate(ctxs[i].lease_id, "sess_123"));
+    }
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(MAX_PENDING_WS, live);
+    ASSERT_EQ_INT(0, pending);
+
+    /* Reserve next 8 connections */
+    for (int i = 8; i < 16; i++) {
+        ASSERT_EQ_INT(0, pty_admission_reserve((struct mg_connection *)(uintptr_t)(i + 1), &ctxs[i]));
+        ASSERT_TRUE(ctxs[i].lease_id != 0);
+    }
+    /* Confirm and authenticate these 8 connections as well */
+    for (int i = 8; i < 16; i++) {
+        ASSERT_EQ_INT(0, pty_admission_confirm(ctxs[i].lease_id));
+        ASSERT_EQ_INT(0, pty_admission_authenticate(ctxs[i].lease_id, "sess_456"));
+    }
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(16, live);
+    ASSERT_EQ_INT(0, pending);
+
+    /* Reserve remaining 2 connections up to MAX_LIVE_WS (18) */
+    for (int i = 16; i < MAX_LIVE_WS; i++) {
+        ASSERT_EQ_INT(0, pty_admission_reserve((struct mg_connection *)(uintptr_t)(i + 1), &ctxs[i]));
+        ASSERT_TRUE(ctxs[i].lease_id != 0);
+    }
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(MAX_LIVE_WS, live);
+    ASSERT_EQ_INT(2, pending);
+
+    /* 19th connection must be rejected due to total live WebSocket limit */
+    ASSERT_EQ_INT(-1, pty_admission_reserve((struct mg_connection *)(uintptr_t)1000, &overflow_ctx));
+
+    /* Release all active leases */
+    for (int i = 0; i < MAX_LIVE_WS; i++) {
+        pty_admission_release_lease(ctxs[i].lease_id);
+    }
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(0, live);
+    ASSERT_EQ_INT(0, pending);
+}
+
+static void test_pty_admission_lifecycle_and_reclamation(void)
+{
+    ws_conn_ctx_t ctx1;
+    memset(&ctx1, 0, sizeof(ctx1));
+    ASSERT_EQ_INT(0, pty_admission_reserve((struct mg_connection *)(uintptr_t)42, &ctx1));
+    uint64_t lease1 = ctx1.lease_id;
+    ASSERT_TRUE(lease1 != 0);
+
+    ASSERT_EQ_INT(0, pty_admission_confirm(lease1));
+    ASSERT_EQ_INT(0, pty_admission_authenticate(lease1, "sess_abc"));
+
+    ASSERT_FALSE(pty_admission_is_close_requested(lease1));
+    pty_admission_request_close(lease1);
+    ASSERT_TRUE(pty_admission_is_close_requested(lease1));
+
+    pty_admission_release_lease(lease1);
+
+    int live = -1, pending = -1;
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(0, live);
+    ASSERT_EQ_INT(0, pending);
+
+    /* Next allocation should reuse slot but assign an incremented generation */
+    ws_conn_ctx_t ctx2;
+    memset(&ctx2, 0, sizeof(ctx2));
+    ASSERT_EQ_INT(0, pty_admission_reserve((struct mg_connection *)(uintptr_t)43, &ctx2));
+    uint64_t lease2 = ctx2.lease_id;
+    ASSERT_TRUE(lease2 != 0);
+    ASSERT_TRUE(lease2 != lease1);
+
+    /* Slot index in lower 32 bits should match, but upper generation must differ */
+    uint32_t slot1 = (uint32_t)(lease1 & 0xFFFFFFFF);
+    uint32_t slot2 = (uint32_t)(lease2 & 0xFFFFFFFF);
+    uint32_t gen1  = (uint32_t)(lease1 >> 32);
+    uint32_t gen2  = (uint32_t)(lease2 >> 32);
+    ASSERT_EQ_INT((int)slot1, (int)slot2);
+    ASSERT_TRUE(gen2 > gen1);
+
+    /* Stale lease operations on old generation must fail or be no-ops */
+    ASSERT_EQ_INT(-1, pty_admission_confirm(lease1));
+    ASSERT_EQ_INT(-1, pty_admission_authenticate(lease1, "sess_stale"));
+    pty_admission_release_lease(lease1); /* Stale release: ignored */
+
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(1, live); /* Still 1 live from ctx2 */
+
+    /* Clean up ctx2 */
+    pty_admission_release_lease(lease2);
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(0, live);
+    ASSERT_EQ_INT(0, pending);
+}
+
+static void test_pty_admission_handshake_abort_cleanup(void)
+{
+    ws_conn_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ASSERT_EQ_INT(0, pty_admission_reserve((struct mg_connection *)(uintptr_t)777, &ctx));
+
+    int live = -1, pending = -1;
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(1, live);
+    ASSERT_EQ_INT(1, pending);
+
+    /* Early abort during handshake before ready: connection_close callback runs */
+    pty_admission_release_lease(ctx.lease_id);
+
+    pty_admission_get_counts(&live, &pending);
+    ASSERT_EQ_INT(0, live);
+    ASSERT_EQ_INT(0, pending);
+}
+
 int main(void)
 {
     TEST_INIT();
@@ -291,6 +432,9 @@ int main(void)
     RUN_TEST(test_pty_shutdown_multiple_sessions_and_descendants);
     RUN_TEST(test_pty_session_status_and_list);
     RUN_TEST(test_pty_session_max_limit);
+    RUN_TEST(test_pty_admission_capacity_and_limits);
+    RUN_TEST(test_pty_admission_lifecycle_and_reclamation);
+    RUN_TEST(test_pty_admission_handshake_abort_cleanup);
 
     TEST_REPORT();
 }

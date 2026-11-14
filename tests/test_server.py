@@ -109,9 +109,10 @@ def run_tests():
     print("=== Starting SmartShell Server Integration & Security Tests ===")
     tests_run = 0
     tests_passed = 0
+    active_test_sessions = []
 
     def test(name, fn):
-        nonlocal tests_run, tests_passed
+        nonlocal tests_run, tests_passed, active_test_sessions
         tests_run += 1
         print(f"  RUN  {name}")
         try:
@@ -120,7 +121,32 @@ def run_tests():
             print(f"  PASS {name}")
         except Exception as e:
             print(f"  FAIL {name}: {e}")
+            if server and server.proc:
+                try:
+                    # Non-blocking read of whatever is in stderr
+                    import fcntl
+                    fd = server.proc.stderr.fileno()
+                    fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+                    fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+                    err_bytes = server.proc.stderr.read()
+                    if err_bytes:
+                        print(f"  [SERVER STDERR]:\n{err_bytes[-3000:]}")
+                except Exception:
+                    pass
             raise
+        finally:
+            if active_test_sessions:
+                th = {
+                    "Host": f"127.0.0.1:{port}",
+                    "Authorization": f"Bearer {server.token}",
+                    "Content-Type": "application/json"
+                }
+                for sid in active_test_sessions:
+                    try:
+                        raw_http_request(port, "DELETE", f"/api/terminal/{sid}", headers=th)
+                    except Exception:
+                        pass
+                active_test_sessions.clear()
 
     port = find_free_port()
     server = ServerInstance(port)
@@ -644,7 +670,9 @@ def run_tests():
             status, _, body = raw_http_request(port, "POST", "/api/terminal", headers=term_headers,
                                                body=json.dumps({"cols": cols, "rows": rows}))
             assert status == 201, f"Failed to create session: {status}"
-            return json.loads(body)
+            sess = json.loads(body)
+            active_test_sessions.append(sess["session_id"])
+            return sess
 
         def ws_connect(p=port, uri_path="/ws/terminal", origin=None, extra_headers=None):
             if origin is None:
@@ -1287,6 +1315,206 @@ def run_tests():
                     s_multi.stop(signal.SIGKILL)
 
         test("terminal WebSocket shutdown multi-session child and descendant cleanup", test_ws_shutdown_multi_session_descendants)
+
+        # Test 37: Pending-Auth Capacity Saturation & 503 Rejection
+        def test_ws_pending_auth_capacity_limit():
+            async def _run():
+                conns = []
+                try:
+                    for _ in range(8):
+                        ws = await ws_connect(port)
+                        conns.append(ws)
+
+                    # 9th unauthenticated connection must be rejected with 503
+                    rejected = False
+                    try:
+                        extra_ws = await ws_connect(port)
+                        await extra_ws.close()
+                    except websockets.exceptions.InvalidStatusCode as e:
+                        assert e.status_code == 503, f"Expected 503, got {e.status_code}"
+                        rejected = True
+                    except Exception:
+                        rejected = True
+                    assert rejected, "9th unauthenticated connection was not rejected with capacity limit!"
+                finally:
+                    for ws in conns:
+                        await ws.close()
+            asyncio.run(_run())
+        test("terminal WebSocket pending-auth capacity limit and 503 rejection", test_ws_pending_auth_capacity_limit)
+
+        # Test 38: Unauthenticated Connection Timeout Clean Close
+        def test_ws_unauth_timeout_clean_close():
+            async def _run():
+                async with ws_connect(port) as ws:
+                    start = time.time()
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=7.0)
+                        msg = json.loads(raw)
+                        assert msg.get("type") == "error"
+                        assert "authentication timeout" in msg.get("message", "")
+                    except (websockets.exceptions.ConnectionClosed, asyncio.TimeoutError):
+                        pass
+                    elapsed = time.time() - start
+                    assert elapsed >= 4.0, f"Closed too early: {elapsed}s"
+            asyncio.run(_run())
+        test("terminal WebSocket unauthenticated connection timeout clean close", test_ws_unauth_timeout_clean_close)
+
+        # Test 39: Handshake Failure / Early TCP Abort Capacity Cleanup
+        def test_ws_handshake_early_abort_cleanup():
+            async def _run():
+                # Open raw TCP socket and send valid handshake request
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect(("127.0.0.1", port))
+                req = (
+                    f"GET /ws/terminal HTTP/1.1\r\n"
+                    f"Host: 127.0.0.1:{port}\r\n"
+                    f"Origin: http://127.0.0.1:{port}\r\n"
+                    f"Upgrade: websocket\r\n"
+                    f"Connection: Upgrade\r\n"
+                    f"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                    f"Sec-WebSocket-Version: 13\r\n\r\n"
+                )
+                s.sendall(req.encode("ascii"))
+                resp = s.recv(1024).decode("latin-1", errors="ignore")
+                assert "101" in resp or "HTTP/1.1" in resp
+                # Abruptly close socket before completing handshake or sending frame
+                s.close()
+                await asyncio.sleep(0.5)
+
+                # Verify all 8 pending slots are available without capacity leak
+                conns = []
+                try:
+                    for _ in range(8):
+                        ws = await ws_connect(port)
+                        conns.append(ws)
+                finally:
+                    for ws in conns:
+                        await ws.close()
+            asyncio.run(_run())
+        test("terminal WebSocket handshake early abort capacity cleanup", test_ws_handshake_early_abort_cleanup)
+
+        # Test 40: Concurrent Disconnect / Rapid Reconnect Stress Under Load
+        def test_ws_concurrent_disconnect_reconnect_stress():
+            async def _run():
+                sess = create_test_session()
+                sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+                # Connect and start output stream
+                async with ws_connect(port) as ws:
+                    await ws_auth_and_drain(ws, sid, ticket)
+                    cmd = 'python3 -c "import time; [print(\'stress_reconnect_line\', flush=True) or time.sleep(0.02) for _ in range(500)]"\n'
+                    await ws.send(json.dumps({"type": "input", "data": cmd}))
+                    await asyncio.sleep(0.1)
+
+                # Rapidly reconnect across 4 iterations with fresh tickets
+                for iteration in range(4):
+                    t_status, _, t_body = raw_http_request(port, "POST", f"/api/terminal/{sid}/reconnect", headers=term_headers)
+                    assert t_status == 200, f"Ticket generation failed (iter {iteration}): {t_status} - {t_body}"
+                    cur_ticket = json.loads(t_body)["ws_ticket"]
+
+                    async with ws_connect(port) as ws:
+                        await ws.send(json.dumps({"type": "auth", "session_id": sid, "ticket": cur_ticket}))
+                        for _ in range(3):
+                            raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                            msg = json.loads(raw)
+                            assert msg.get("type") in ("output", "auth_ok")
+
+                d_status, _, _ = raw_http_request(port, "DELETE", f"/api/terminal/{sid}", headers=term_headers)
+                assert d_status == 200
+            asyncio.run(_run())
+        test("terminal WebSocket concurrent disconnect reconnect stress", test_ws_concurrent_disconnect_reconnect_stress)
+
+        # Test 41: Worker Headroom Verification Under WebSocket Saturation
+        def test_worker_headroom_under_ws_saturation():
+            async def _run():
+                sessions = []
+                conns = []
+                try:
+                    # Saturate with 16 authenticated sessions + 2 pending connections (18 total WebSockets)
+                    for _ in range(16):
+                        sess = create_test_session()
+                        sessions.append(sess)
+                        ws = await ws_connect(port)
+                        await ws_auth_and_drain(ws, sess["session_id"], sess["ws_ticket"])
+                        conns.append(ws)
+
+                    # Connect 2 pending (unauthenticated) connections to reach MAX_LIVE_WS = 18
+                    p_ws1 = await ws_connect(port)
+                    p_ws2 = await ws_connect(port)
+                    conns.extend([p_ws1, p_ws2])
+
+                    # 19th connection must be rejected with 503 (server capacity exceeded)
+                    rejected = False
+                    try:
+                        extra_ws = await ws_connect(port)
+                        await extra_ws.close()
+                    except websockets.exceptions.InvalidStatusCode as e:
+                        assert e.status_code == 503, f"Expected 503, got {e.status_code}"
+                        rejected = True
+                    except Exception:
+                        rejected = True
+                    assert rejected, "19th connection was not rejected under WebSocket saturation!"
+
+                    # Verify REST endpoints remain responsive under full WebSocket saturation
+                    for ep in ["/api/health", "/api/sysinfo", "/api/metrics", "/api/processes"]:
+                        st, _, _ = raw_http_request(port, "GET", ep, headers=auth_headers)
+                        assert st == 200, f"REST {ep} returned {st} under WS load"
+                finally:
+                    for ws in conns:
+                        try:
+                            await ws.close()
+                        except Exception:
+                            pass
+                    for sess in sessions:
+                        raw_http_request(port, "DELETE", f"/api/terminal/{sess['session_id']}", headers=term_headers)
+            asyncio.run(_run())
+        test("worker headroom and REST responsiveness under WebSocket load", test_worker_headroom_under_ws_saturation)
+
+        # Test 42: Resilient Child Process Reaping Non-Blocking Timeout
+        def test_resilient_child_reaping_nonblocking():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _setup():
+                async with ws_connect(port) as ws:
+                    await ws_auth_and_drain(ws, sid, ticket)
+                    await ws.send(json.dumps({"type": "input", "data": "python3 -c \"import time; time.sleep(100)\"\n"}))
+                    await asyncio.sleep(0.2)
+            asyncio.run(_setup())
+
+            t0 = time.time()
+            st, _, _ = raw_http_request(port, "DELETE", f"/api/terminal/{sid}", headers=term_headers)
+            elapsed = time.time() - t0
+            assert st == 200, f"Expected 200, got {st}"
+            assert elapsed < 1.0, f"Session deletion blocked for {elapsed}s (exceeded non-blocking threshold)!"
+        test("resilient child process reaping non-blocking timeout", test_resilient_child_reaping_nonblocking)
+
+        # Test 43: REST Responsiveness Empirical Latency Target Under WebSocket Load
+        def test_rest_latency_under_websocket_load():
+            async def _run():
+                sess = create_test_session()
+                sid, ticket = sess["session_id"], sess["ws_ticket"]
+                ws = await ws_connect(port)
+                await ws_auth_and_drain(ws, sid, ticket)
+                cmd = 'python3 -c "import time; [print(\'ping\', flush=True) or time.sleep(0.05) for _ in range(500)]"\n'
+                await ws.send(json.dumps({"type": "input", "data": cmd}))
+
+                latencies = []
+                for _ in range(30):
+                    t0 = time.time()
+                    st, _, _ = raw_http_request(port, "GET", "/api/health", headers=auth_headers)
+                    dt = time.time() - t0
+                    assert st == 200
+                    latencies.append(dt)
+
+                await ws.close()
+                raw_http_request(port, "DELETE", f"/api/terminal/{sid}", headers=term_headers)
+
+                latencies.sort()
+                p95 = latencies[int(len(latencies) * 0.95)]
+                assert p95 < 0.200, f"p95 latency {p95*1000:.1f}ms exceeded empirical threshold (200ms)"
+            asyncio.run(_run())
+        test("REST responsiveness empirical latency target under WebSocket load", test_rest_latency_under_websocket_load)
 
     finally:
         # Test 13: Clean shutdown on SIGINT / SIGTERM

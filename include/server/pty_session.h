@@ -11,6 +11,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <sys/types.h>
 #include <time.h>
 #include <pthread.h>
@@ -28,15 +29,22 @@ struct mg_connection;
 #define PTY_READ_CHUNK_SIZE         4096  /* Read chunk size for multiplexer */
 #define WS_MAX_PAYLOAD_SIZE         65536 /* 64KB max incoming WebSocket frame */
 
+/* Admission Control Limits */
+#define MAX_LIVE_WS                 18    /* Max concurrent live WebSockets (W=24, headroom=6) */
+#define MAX_PENDING_WS              8     /* Max pending unauthenticated WebSockets */
+
 /*
  * Per-WebSocket-connection state for terminal sessions.
  */
 typedef struct {
     char session_id[PTY_SESSION_ID_HEX_LEN + 1];
     bool authenticated;
-    time_t connected_at;
+    struct timespec connected_at;
+    uint64_t lease_id;
     struct mg_connection *conn;
-} ws_conn_data_t;
+} ws_conn_ctx_t;
+
+typedef ws_conn_ctx_t ws_conn_data_t;
 
 /* Session lifecycle status */
 typedef enum {
@@ -140,18 +148,24 @@ void pty_session_detach_conn(pty_session_t *session, struct mg_connection *conn)
 #define WS_AUTH_TIMEOUT_SEC         5     /* Unauthenticated connection timeout */
 
 /*
- * Track pending unauthenticated connection for timeout enforcement.
+ * WebSocket Connection Admission Control and Registry.
+ */
+int pty_admission_reserve(struct mg_connection *conn, ws_conn_ctx_t *ctx);
+int pty_admission_confirm(uint64_t lease_id);
+int pty_admission_authenticate(uint64_t lease_id, const char *session_id);
+void pty_admission_request_close(uint64_t lease_id);
+bool pty_admission_is_close_requested(uint64_t lease_id);
+void pty_admission_release_lease(uint64_t lease_id);
+void pty_admission_on_connection_close(const struct mg_connection *conn);
+void pty_admission_check_timeouts(void);
+int pty_admission_get_counts(int *live_count, int *pending_count);
+uint64_t pty_admission_find_lease_by_conn(const struct mg_connection *conn);
+
+/*
+ * Track pending unauthenticated connection for timeout enforcement (legacy wrappers).
  */
 void pty_session_add_pending_auth(struct mg_connection *conn);
-
-/*
- * Remove connection from pending unauthenticated tracking.
- */
 void pty_session_remove_pending_auth(const struct mg_connection *conn);
-
-/*
- * Check pending unauthenticated WebSocket connections and close timed-out ones.
- */
 void pty_session_check_auth_timeouts(void);
 
 /*

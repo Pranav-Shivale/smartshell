@@ -20,3 +20,6 @@ vgcore.*
 
 # OS files
 .DS_Store
+
+# Local SmartShell credentials
+.smartshell/
