@@ -1161,6 +1161,133 @@ def run_tests():
             asyncio.run(_run())
         test("terminal WebSocket unauthenticated connection timeout", test_ws_unauth_timeout)
 
+        # Test 35: Continuous Output Stress Test under Rapid Reconnects
+        def test_ws_continuous_output_reconnect_stress():
+            sess = create_test_session()
+            sid, ticket = sess["session_id"], sess["ws_ticket"]
+
+            async def _run():
+                cur_ticket = ticket
+                # Launch external command generating rapid stdout chunks
+                cmd = 'python3 -c "import time; [print(f\'stress_line_{i}\', flush=True) or time.sleep(0.01) for i in range(500)]"\n'
+
+                async with ws_connect(port) as ws:
+                    await ws_auth_and_drain(ws, sid, cur_ticket)
+                    await ws.send(json.dumps({"type": "input", "data": cmd}))
+                    # Verify stream output begins
+                    got_stream = False
+                    for _ in range(15):
+                        raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                        msg = json.loads(raw)
+                        if msg.get("type") == "output" and "stress_line" in msg.get("data", ""):
+                            got_stream = True
+                            break
+                    assert got_stream, "Initial stress stream data not received"
+
+                # Disconnect and reconnect rapidly 5 times while child is continuously spewing data
+                for cycle in range(5):
+                    status, _, body = raw_http_request(port, "POST", f"/api/terminal/{sid}/reconnect", headers=term_headers)
+                    assert status == 200
+                    cur_ticket = json.loads(body)["ws_ticket"]
+
+                    async with ws_connect(port) as ws:
+                        await ws.send(json.dumps({"type": "auth", "session_id": sid, "ticket": cur_ticket}))
+                        auth_ok = False
+                        saw_stream = False
+                        for _ in range(25):
+                            raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
+                            msg = json.loads(raw)
+                            if msg.get("type") == "auth_ok":
+                                auth_ok = True
+                            elif msg.get("type") == "output" and "stress_line" in msg.get("data", ""):
+                                saw_stream = True
+                            if auth_ok and saw_stream:
+                                break
+                        assert auth_ok, f"Cycle {cycle}: auth_ok not received on reconnect"
+                        # Send minor input keystroke to ensure bidirectionality during heavy output
+                        await ws.send(json.dumps({"type": "input", "data": " "}))
+                        await asyncio.sleep(0.05)
+
+                # Final reconnect: interrupt loop and exit cleanly
+                status, _, body = raw_http_request(port, "POST", f"/api/terminal/{sid}/reconnect", headers=term_headers)
+                assert status == 200
+                cur_ticket = json.loads(body)["ws_ticket"]
+                async with ws_connect(port) as ws:
+                    await ws_auth_and_drain(ws, sid, cur_ticket)
+                    await ws.send(json.dumps({"type": "input", "data": "\x03"}))
+                    await asyncio.sleep(0.1)
+                    await ws.send(json.dumps({"type": "input", "data": "exit\n"}))
+                    await ws_recv_output_until(ws, "[exit:0]")
+
+            asyncio.run(_run())
+        test("terminal WebSocket continuous output stress test under rapid connect/disconnect/reconnect", test_ws_continuous_output_reconnect_stress)
+
+        # Test 36: Server Shutdown Multi-Session Child & Descendant Cleanup Audit
+        def test_ws_shutdown_multi_session_descendants():
+            p_multi = find_free_port()
+            s_multi = ServerInstance(p_multi)
+            s_multi.start()
+            headers_multi = {
+                "Host": f"127.0.0.1:{p_multi}",
+                "Authorization": f"Bearer {s_multi.token}",
+                "Content-Type": "application/json"
+            }
+            try:
+                # Session 1: Clean idle shell
+                s1 = json.loads(raw_http_request(p_multi, "POST", "/api/terminal", headers=headers_multi)[2])
+                # Session 2: Ignores SIGHUP
+                s2 = json.loads(raw_http_request(p_multi, "POST", "/api/terminal", headers=headers_multi)[2])
+                # Session 3: Spawns background process jobs
+                s3 = json.loads(raw_http_request(p_multi, "POST", "/api/terminal", headers=headers_multi)[2])
+
+                child_pids = [s1["pid"], s2["pid"], s3["pid"]]
+                assert len(child_pids) == 3 and all(p > 0 for p in child_pids), f"Invalid child PIDs: {child_pids}"
+
+                # Send commands via WebSocket to s2 and s3
+                async def _setup_sessions():
+                    # s2: trap SIGHUP and sleep
+                    async with ws_connect(p_multi) as ws2:
+                        await ws_auth_and_drain(ws2, s2["session_id"], s2["ws_ticket"])
+                        await ws2.send(json.dumps({"type": "input", "data": "trap '' HUP; sleep 60\n"}))
+                        await asyncio.sleep(0.1)
+
+                    # s3: spawn background sleep jobs
+                    async with ws_connect(p_multi) as ws3:
+                        await ws_auth_and_drain(ws3, s3["session_id"], s3["ws_ticket"])
+                        await ws3.send(json.dumps({"type": "input", "data": "sleep 60 & sleep 60 &\n"}))
+                        await asyncio.sleep(0.1)
+
+                asyncio.run(_setup_sessions())
+                time.sleep(0.2)
+
+                # Stop server with SIGINT
+                s_multi.stop(signal.SIGINT)
+                assert s_multi.proc.returncode == 0
+
+                # Verify all child PIDs are completely reaped and no longer exist
+                for cpid in child_pids:
+                    try:
+                        os.kill(cpid, 0)
+                        assert False, f"Child PID {cpid} still alive after shutdown!"
+                    except ProcessLookupError:
+                        pass # Successfully reaped
+
+                # Verify no processes in /proc have SID matching any child PID
+                for entry in os.listdir("/proc"):
+                    if entry.isdigit():
+                        p = int(entry)
+                        if p > 1 and p != os.getpid():
+                            try:
+                                sid = os.getsid(p)
+                                assert sid not in child_pids, f"Descendant process {p} with SID {sid} survived shutdown!"
+                            except ProcessLookupError:
+                                pass
+            finally:
+                if s_multi.proc and s_multi.proc.poll() is None:
+                    s_multi.stop(signal.SIGKILL)
+
+        test("terminal WebSocket shutdown multi-session child and descendant cleanup", test_ws_shutdown_multi_session_descendants)
+
     finally:
         # Test 13: Clean shutdown on SIGINT / SIGTERM
         server.stop(signal.SIGINT)

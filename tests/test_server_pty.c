@@ -12,6 +12,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <errno.h>
+#include <dirent.h>
 
 static void test_pty_session_create_and_find(void)
 {
@@ -227,6 +228,55 @@ static void test_pty_child_sighup_and_sigkill_escalation(void)
     pty_manager_shutdown();
 }
 
+static void test_pty_shutdown_multiple_sessions_and_descendants(void)
+{
+    ASSERT_EQ_INT(0, pty_manager_init("bin/smartshell", 30));
+
+    pty_session_t *s1 = pty_session_create(80, 24);
+    pty_session_t *s2 = pty_session_create(80, 24);
+    pty_session_t *s3 = pty_session_create(80, 24);
+    ASSERT_TRUE(s1 != NULL);
+    ASSERT_TRUE(s2 != NULL);
+    ASSERT_TRUE(s3 != NULL);
+
+    pid_t pid1 = s1->child_pid;
+    pid_t pid2 = s2->child_pid;
+    pid_t pid3 = s3->child_pid;
+
+    /* Session 2: ignores SIGHUP */
+    const char *cmd2 = "trap '' HUP; sleep 60\n";
+    pty_session_write_input(s2, cmd2, strlen(cmd2));
+
+    /* Session 3: spawns background processes */
+    const char *cmd3 = "sleep 60 & sleep 60 &\n";
+    pty_session_write_input(s3, cmd3, strlen(cmd3));
+
+    usleep(200000); /* 200ms to allow processes to spawn */
+
+    /* Shutdown manager with multiple active sessions and diverse children */
+    pty_manager_shutdown();
+
+    /* Verify all 3 child shells are dead and reaped */
+    ASSERT_TRUE(kill(pid1, 0) == -1 && errno == ESRCH);
+    ASSERT_TRUE(kill(pid2, 0) == -1 && errno == ESRCH);
+    ASSERT_TRUE(kill(pid3, 0) == -1 && errno == ESRCH);
+
+    /* Verify no descendant process remains with session ID matching any session */
+    DIR *dir = opendir("/proc");
+    if (dir != NULL) {
+        struct dirent *ent;
+        while ((ent = readdir(dir)) != NULL) {
+            if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+            pid_t p = (pid_t)atoi(ent->d_name);
+            if (p > 1 && p != getpid()) {
+                pid_t sid = getsid(p);
+                ASSERT_TRUE(sid != pid1 && sid != pid2 && sid != pid3);
+            }
+        }
+        closedir(dir);
+    }
+}
+
 int main(void)
 {
     TEST_INIT();
@@ -238,6 +288,7 @@ int main(void)
     RUN_TEST(test_pty_session_resize);
     RUN_TEST(test_pty_session_input_and_output);
     RUN_TEST(test_pty_child_sighup_and_sigkill_escalation);
+    RUN_TEST(test_pty_shutdown_multiple_sessions_and_descendants);
     RUN_TEST(test_pty_session_status_and_list);
     RUN_TEST(test_pty_session_max_limit);
 

@@ -26,6 +26,7 @@
 #include <time.h>
 #include <poll.h>
 #include <pthread.h>
+#include <dirent.h>
 
 /* Global PTY Manager State */
 static pty_session_t    g_sessions[PTY_MAX_SESSIONS];
@@ -324,6 +325,30 @@ static void pty_ws_send_exit(struct mg_connection *conn, int exit_code)
 }
 
 /*
+ * Kill any surviving descendant processes that belong to the PTY session.
+ * Reads /proc to find processes whose session ID (SID) matches sid.
+ */
+static void pty_kill_session_descendants(pid_t sid)
+{
+    if (sid <= 1) return;
+
+    DIR *dir = opendir("/proc");
+    if (dir == NULL) return;
+
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (ent->d_name[0] < '0' || ent->d_name[0] > '9') continue;
+        pid_t p = (pid_t)atoi(ent->d_name);
+        if (p > 1 && p != getpid()) {
+            if (getsid(p) == sid) {
+                kill(p, SIGKILL);
+            }
+        }
+    }
+    closedir(dir);
+}
+
+/*
  * Coordinated single-owner child process termination and reaping.
  *
  * Sends SIGHUP to the child process group and child PID, waits up to 50ms,
@@ -349,6 +374,7 @@ static void pty_session_reap_child_locked(pty_session_t *s, bool send_signals)
                 s->exit_code = 128 + WTERMSIG(status);
             }
             s->child_pid = -1;
+            pty_kill_session_descendants(pid);
             return;
         }
     }
@@ -372,7 +398,20 @@ static void pty_session_reap_child_locked(pty_session_t *s, bool send_signals)
         /* Child ignored SIGHUP or hasn't exited: escalate to SIGKILL */
         kill(-pid, SIGKILL);
         kill(pid, SIGKILL);
-        waitpid(pid, &status, 0);
+
+        /* Poll waitpid with WNOHANG for up to 50ms */
+        for (int i = 0; i < 5; i++) {
+            usleep(10000); /* 10ms */
+            pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid) {
+                reaped = true;
+                break;
+            }
+        }
+
+        if (!reaped) {
+            waitpid(pid, &status, 0);
+        }
     }
 
     if (WIFEXITED(status)) {
@@ -382,6 +421,9 @@ static void pty_session_reap_child_locked(pty_session_t *s, bool send_signals)
     }
 
     s->child_pid = -1;
+
+    /* Clean up any detached or background descendant processes belonging to the session */
+    pty_kill_session_descendants(pid);
 }
 
 static void pty_session_do_terminate_locked(pty_session_t *s)
