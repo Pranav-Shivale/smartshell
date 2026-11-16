@@ -308,6 +308,18 @@ class SmartTerminal {
     let payload = null;
 
     if (e.ctrlKey && !e.altKey && !e.metaKey) {
+      // Allow native browser copy (Ctrl+C) when text is selected
+      if (e.key === 'c' || e.key === 'C') {
+        const sel = window.getSelection();
+        if (sel && sel.toString().length > 0) {
+          return;
+        }
+      }
+      // Allow native browser paste (Ctrl+V) so paste event fires
+      if (e.key === 'v' || e.key === 'V') {
+        return;
+      }
+
       const keyUpper = e.key.toUpperCase();
       const code = keyUpper.charCodeAt(0);
       if (code >= 65 && code <= 90) { // Ctrl+A to Ctrl+Z
@@ -655,6 +667,9 @@ class SmartTerminal {
   _render() {
     if (!this.wrapper) return;
 
+    // Preserve scroll position if user deliberately scrolled up into history
+    const wasNearBottom = (this.wrapper.scrollHeight - this.wrapper.scrollTop - this.wrapper.clientHeight) < 40;
+
     const visibleLines = [];
 
     // Include scrollback if not in alternate screen
@@ -672,7 +687,9 @@ class SmartTerminal {
     }
 
     this.wrapper.innerHTML = visibleLines.join('');
-    this.wrapper.scrollTop = this.wrapper.scrollHeight;
+    if (wasNearBottom) {
+      this.wrapper.scrollTop = this.wrapper.scrollHeight;
+    }
   }
 
   _formatLineHTML(line, isCursorRow = false) {
@@ -691,7 +708,7 @@ class SmartTerminal {
           out += '</span>';
           curSpanOpen = false;
         }
-        out += '<span class="terminal-cursor"></span>';
+        out += `<span class="terminal-cursor">${this._escape(cell.ch || ' ')}</span>`;
         continue;
       }
 
@@ -727,7 +744,7 @@ class SmartTerminal {
 
     // If cursor is at the very end of line
     if (isCursorRow && this.cursorX >= colCount && this.cursorVisible) {
-      out += '<span class="terminal-cursor"></span>';
+      out += '<span class="terminal-cursor">&nbsp;</span>';
     }
 
     out += '</div>';
