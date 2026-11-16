@@ -1044,6 +1044,15 @@ document.addEventListener('DOMContentLoaded', () => {
       }
 
       const saveBtn = document.getElementById('btn-save-token');
+      if (tokenInput && saveBtn) {
+        tokenInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            saveBtn.click();
+          }
+        });
+      }
+
       if (saveBtn) {
         saveBtn.addEventListener('click', async () => {
           const val = (tokenInput?.value || '').trim();
@@ -1073,8 +1082,17 @@ document.addEventListener('DOMContentLoaded', () => {
         clearBtn.addEventListener('click', () => {
           window.api.setToken('');
           if (tokenInput) tokenInput.value = '';
+          // Terminate active terminal sessions and close WebSockets
+          this.sessions.forEach((s) => {
+            s.terminal.destroy();
+            s.tabEl.remove();
+            s.wrapperEl.remove();
+          });
+          this.sessions.clear();
+          this.currentSessionId = null;
+          this._updateSessionCount();
           this.setConnectionStatus('disconnected', 'Logged Out');
-          this.showToast('Token cleared from local storage', 'info');
+          this.showToast('Logged out. Token and sessions cleared.', 'info');
         });
       }
     },
