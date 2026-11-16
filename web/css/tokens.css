@@ -151,6 +151,61 @@
   --gantt-idle: #22242b;
 }
 
+@media (prefers-color-scheme: light) {
+  :root {
+    /* Color: Neutral Zinc Scale (Light mode) */
+    --bg-canvas: #f8fafc;
+    --bg-subtle: #f1f5f9;
+    --bg-surface: #ffffff;
+    --bg-surface-hover: #f1f5f9;
+    --bg-surface-active: #e2e8f0;
+    --bg-input: #ffffff;
+    --bg-overlay: rgba(15, 23, 42, 0.5);
+
+    /* Legacy mappings */
+    --bg-app: var(--bg-canvas);
+    --bg-sidebar: var(--bg-subtle);
+    --bg-header: var(--bg-subtle);
+    --bg-card: var(--bg-surface);
+    --bg-card-hover: var(--bg-surface-hover);
+    --bg-terminal: #090a0c;
+
+    /* Borders: 1px subtle neutral */
+    --border-subtle: #e2e8f0;
+    --border-default: #cbd5e1;
+    --border-strong: #94a3b8;
+    --border-focus: #3b82f6;
+
+    --border: var(--border-default);
+    --border-light: var(--border-subtle);
+
+    /* Neutral Typography Colors */
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-tertiary: #94a3b8;
+    --text-disabled: #cbd5e1;
+
+    --text-main: var(--text-primary);
+    --text-muted: var(--text-secondary);
+    --text-faint: var(--text-tertiary);
+
+    /* Accent & Semantic overrides for high contrast on light backgrounds */
+    --accent-subtle: rgba(59, 130, 246, 0.08);
+    --accent-border: rgba(59, 130, 246, 0.25);
+
+    --color-success-subtle: rgba(34, 197, 94, 0.1);
+    --color-warning-subtle: rgba(245, 158, 11, 0.1);
+    --color-danger-subtle: rgba(239, 68, 68, 0.1);
+    --color-info-subtle: rgba(56, 189, 248, 0.1);
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
+    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.07);
+    --shadow-modal: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+
+    --gantt-idle: #e2e8f0;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
