@@ -650,6 +650,15 @@ document.addEventListener('DOMContentLoaded', () => {
           }
         });
       }
+
+      document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' || e.key === 'Esc') {
+          const m = document.getElementById('proc-modal');
+          if (m && m.classList.contains('active')) {
+            this.closeProcModal();
+          }
+        }
+      });
     },
 
     // ========================================================
