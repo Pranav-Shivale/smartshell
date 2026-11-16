@@ -276,6 +276,15 @@ body {
   flex-direction: column;
 }
 
+#view-terminal:not(.active) {
+  display: none !important;
+}
+
+#view-terminal.active {
+  display: flex !important;
+  flex-direction: column;
+}
+
 .view-container {
   padding: var(--space-4);
   display: flex;

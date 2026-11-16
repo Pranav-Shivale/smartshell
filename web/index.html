@@ -4,8 +4,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>SmartShell 3.0</title>
-  <link rel="stylesheet" href="css/tokens.css">
-  <link rel="stylesheet" href="css/app.css">
+  <link rel="stylesheet" href="css/tokens.css?v=3.0.2">
+  <link rel="stylesheet" href="css/app.css?v=3.0.2">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23ededef' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='4 17 10 12 4 7'/><line x1='12' y1='19' x2='20' y2='19'/></svg>">
 </head>
 <body>
@@ -77,7 +77,7 @@
     <main class="content-area">
 
       <!-- 1. TERMINAL VIEW -->
-      <section id="view-terminal" class="view-panel active terminal-view">
+      <section id="view-terminal" class="view-panel active" style="display: flex;">
         <div class="terminal-header">
           <div id="session-tabs-container" class="terminal-tabs">
             <!-- Tabs added dynamically -->
@@ -95,7 +95,7 @@
       </section>
 
       <!-- 2. DASHBOARD VIEW -->
-      <section id="view-dashboard" class="view-panel">
+      <section id="view-dashboard" class="view-panel" style="display: none;">
         <div class="view-container">
           <div class="stats-grid">
             <div class="card">
@@ -161,7 +161,7 @@
       </section>
 
       <!-- 3. PROCESS EXPLORER VIEW -->
-      <section id="view-processes" class="view-panel">
+      <section id="view-processes" class="view-panel" style="display: none;">
         <div class="view-container">
           <div class="table-toolbar">
             <div class="search-box">
@@ -206,7 +206,7 @@
       </section>
 
       <!-- 4. CPU SCHEDULING LAB VIEW -->
-      <section id="view-scheduling" class="view-panel">
+      <section id="view-scheduling" class="view-panel" style="display: none;">
         <div class="view-container">
           <div class="lab-topbar">
             <div class="algo-chips">
@@ -260,7 +260,7 @@
       </section>
 
       <!-- 5. SYSTEM EXPLORER VIEW -->
-      <section id="view-system" class="view-panel">
+      <section id="view-system" class="view-panel" style="display: none;">
         <div class="view-container">
           <div class="system-columns">
             <div class="card">
@@ -314,7 +314,7 @@
       </section>
 
       <!-- 6. SETTINGS & AUTH VIEW -->
-      <section id="view-settings" class="view-panel">
+      <section id="view-settings" class="view-panel" style="display: none;">
         <div class="view-container">
           <div class="settings-grid">
             <div class="card">
@@ -370,8 +370,8 @@
   <div id="toast-container" class="toast-container"></div>
 
   <!-- Application Scripts -->
-  <script src="js/api.js"></script>
-  <script src="js/terminal.js"></script>
-  <script src="js/app.js"></script>
+  <script src="js/api.js?v=3.0.2"></script>
+  <script src="js/terminal.js?v=3.0.2"></script>
+  <script src="js/app.js?v=3.0.2"></script>
 </body>
 </html>

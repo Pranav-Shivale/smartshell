@@ -15,6 +15,13 @@ document.addEventListener('DOMContentLoaded', () => {
     selectedAlgorithm: 'fcfs',
 
     init() {
+      // Immediately resolve initial view from hash and enforce panel display isolation
+      const hashView = (window.location.hash || '').replace('#', '');
+      const initialView = ['terminal', 'dashboard', 'processes', 'scheduling', 'system', 'settings'].includes(hashView)
+        ? hashView
+        : 'terminal';
+      this.switchView(initialView, false);
+
       this._bindNavigation();
       this._bindTerminalControls();
       this._bindProcessControls();
@@ -64,9 +71,15 @@ document.addEventListener('DOMContentLoaded', () => {
         item.classList.toggle('active', item.dataset.view === viewName);
       });
 
-      // Update main panels active state
+      // Update main panels active state and enforce strict display isolation
       document.querySelectorAll('.view-panel').forEach((panel) => {
-        panel.classList.toggle('active', panel.id === `view-${viewName}`);
+        const isActive = (panel.id === `view-${viewName}`);
+        panel.classList.toggle('active', isActive);
+        if (isActive) {
+          panel.style.setProperty('display', 'flex', 'important');
+        } else {
+          panel.style.setProperty('display', 'none', 'important');
+        }
       });
 
       // Update topbar title
