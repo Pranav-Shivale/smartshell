@@ -3,13 +3,16 @@
 /* ==========================================================================
    RESET & BASE STYLES
    ========================================================================== */
-*, *::before, *::after {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
 }
 
-html, body {
+html,
+body {
   width: 100%;
   height: 100%;
   background-color: var(--bg-canvas);
@@ -28,7 +31,10 @@ a {
   text-decoration: none;
 }
 
-button, input, select, textarea {
+button,
+input,
+select,
+textarea {
   font: inherit;
   color: inherit;
 }
@@ -259,14 +265,14 @@ body {
 }
 
 .view-panel {
-  display: none;
+  display: none !important;
   flex: 1;
   width: 100%;
   height: 100%;
 }
 
 .view-panel.active {
-  display: flex;
+  display: flex !important;
   flex-direction: column;
 }
 
@@ -541,6 +547,7 @@ body {
 }
 
 @media (max-width: 900px) {
+
   .stats-grid,
   .system-columns,
   .settings-grid {
@@ -620,7 +627,8 @@ body {
   background-color: var(--bg-surface-hover);
 }
 
-.data-table td.num, .data-table th.num {
+.data-table td.num,
+.data-table th.num {
   text-align: right;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -699,8 +707,6 @@ body {
    ========================================================================== */
 .terminal-view {
   flex: 1;
-  display: flex;
-  flex-direction: column;
   height: 100%;
   background-color: var(--bg-canvas);
 }
@@ -1126,28 +1132,98 @@ body {
 /* ==========================================================================
    ANSI 16 COLOR UTILITIES
    ========================================================================== */
-.c-0 { color: var(--ansi-0); }
-.c-1 { color: var(--ansi-1); }
-.c-2 { color: var(--ansi-2); }
-.c-3 { color: var(--ansi-3); }
-.c-4 { color: var(--ansi-4); }
-.c-5 { color: var(--ansi-5); }
-.c-6 { color: var(--ansi-6); }
-.c-7 { color: var(--ansi-7); }
-.c-8 { color: var(--ansi-8); }
-.c-9 { color: var(--ansi-9); }
-.c-10 { color: var(--ansi-10); }
-.c-11 { color: var(--ansi-11); }
-.c-12 { color: var(--ansi-12); }
-.c-13 { color: var(--ansi-13); }
-.c-14 { color: var(--ansi-14); }
-.c-15 { color: var(--ansi-15); }
+.c-0 {
+  color: var(--ansi-0);
+}
 
-.bg-0 { background-color: var(--ansi-bg-0); }
-.bg-1 { background-color: var(--ansi-bg-1); }
-.bg-2 { background-color: var(--ansi-bg-2); }
-.bg-3 { background-color: var(--ansi-bg-3); }
-.bg-4 { background-color: var(--ansi-bg-4); }
-.bg-5 { background-color: var(--ansi-bg-5); }
-.bg-6 { background-color: var(--ansi-bg-6); }
-.bg-7 { background-color: var(--ansi-bg-7); }
+.c-1 {
+  color: var(--ansi-1);
+}
+
+.c-2 {
+  color: var(--ansi-2);
+}
+
+.c-3 {
+  color: var(--ansi-3);
+}
+
+.c-4 {
+  color: var(--ansi-4);
+}
+
+.c-5 {
+  color: var(--ansi-5);
+}
+
+.c-6 {
+  color: var(--ansi-6);
+}
+
+.c-7 {
+  color: var(--ansi-7);
+}
+
+.c-8 {
+  color: var(--ansi-8);
+}
+
+.c-9 {
+  color: var(--ansi-9);
+}
+
+.c-10 {
+  color: var(--ansi-10);
+}
+
+.c-11 {
+  color: var(--ansi-11);
+}
+
+.c-12 {
+  color: var(--ansi-12);
+}
+
+.c-13 {
+  color: var(--ansi-13);
+}
+
+.c-14 {
+  color: var(--ansi-14);
+}
+
+.c-15 {
+  color: var(--ansi-15);
+}
+
+.bg-0 {
+  background-color: var(--ansi-bg-0);
+}
+
+.bg-1 {
+  background-color: var(--ansi-bg-1);
+}
+
+.bg-2 {
+  background-color: var(--ansi-bg-2);
+}
+
+.bg-3 {
+  background-color: var(--ansi-bg-3);
+}
+
+.bg-4 {
+  background-color: var(--ansi-bg-4);
+}
+
+.bg-5 {
+  background-color: var(--ansi-bg-5);
+}
+
+.bg-6 {
+  background-color: var(--ansi-bg-6);
+}
+
+.bg-7 {
+  background-color: var(--ansi-bg-7);
+}

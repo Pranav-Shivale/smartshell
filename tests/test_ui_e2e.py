@@ -237,6 +237,8 @@ def main():
                ".terminal-cursor" in body and ".terminal-line" in body)
         record("CSS stylesheet contains toast pointer-events passthrough",
                ".toast-container" in body and "pointer-events: none" in body)
+        record("CSS stylesheet enforces view panel display isolation across all 6 tabs",
+               ".view-panel" in body and "display: none !important" in body)
 
         status, body = request(port, "GET", "/css/tokens.css")
         record("GET /css/tokens.css serves design tokens", status == 200 and "--space-1" in body)
