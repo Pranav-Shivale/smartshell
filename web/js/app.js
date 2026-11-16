@@ -553,6 +553,9 @@ document.addEventListener('DOMContentLoaded', () => {
         return 0;
       });
 
+      const scrollContainer = document.querySelector('.table-scroll');
+      const prevScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
+
       // Display top 60
       const displayList = list.slice(0, 60);
       tbody.innerHTML = '';
@@ -575,11 +578,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const cpuText = p.cpu_percent !== undefined ? `${Number(p.cpu_percent).toFixed(1)}%` : '-';
         const memMB = ((p.rss_bytes || 0) / (1024 * 1024)).toFixed(1);
+        const escName = this._escapeHTML(p.name);
 
         tr.innerHTML = `
           <td><strong>${p.pid}</strong></td>
           <td>${p.ppid}</td>
-          <td><span class="proc-name">${this._escapeHTML(p.name)}</span></td>
+          <td><span class="proc-name" title="${escName}">${escName}</span></td>
           <td><span class="badge ${badgeClass}">${stateChar}</span></td>
           <td class="num">${cpuText}</td>
           <td class="num">${memMB} MB</td>
@@ -591,6 +595,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         tbody.appendChild(tr);
       });
+
+      if (scrollContainer && prevScrollTop > 0) {
+        scrollContainer.scrollTop = prevScrollTop;
+      }
     },
 
     // Process Details Modal

@@ -396,6 +396,12 @@ body {
 }
 
 .proc-name {
+  display: inline-block;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
   font-weight: var(--font-weight-medium);
 }
 
@@ -613,10 +619,6 @@ body {
   text-align: right;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-}
-
-.proc-name {
-  font-weight: var(--font-weight-medium);
 }
 
 .info-table {
