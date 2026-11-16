@@ -786,7 +786,14 @@ document.addEventListener('DOMContentLoaded', () => {
         processes = this._getWorkloadProcesses();
       }
 
-      const quantum = parseInt(document.getElementById('sched-quantum-input')?.value || '4', 10);
+      const quantumInput = document.getElementById('sched-quantum-input');
+      const quantum = parseInt(quantumInput?.value || '4', 10);
+      if (isNaN(quantum) || quantum < 1) {
+        this.showToast('Quantum must be a positive integer (>= 1)', 'warn');
+        if (quantumInput) quantumInput.focus();
+        return;
+      }
+
       const container = document.getElementById('sched-results-container');
       if (container) {
         container.innerHTML = '<div class="loading-state">Running scheduling simulation...</div>';
@@ -930,7 +937,14 @@ document.addEventListener('DOMContentLoaded', () => {
         processes = this._getWorkloadProcesses();
       }
 
-      const quantum = parseInt(document.getElementById('sched-quantum-input')?.value || '4', 10);
+      const quantumInput = document.getElementById('sched-quantum-input');
+      const quantum = parseInt(quantumInput?.value || '4', 10);
+      if (isNaN(quantum) || quantum < 1) {
+        this.showToast('Quantum must be a positive integer (>= 1)', 'warn');
+        if (quantumInput) quantumInput.focus();
+        return;
+      }
+
       const container = document.getElementById('sched-results-container');
       if (container) {
         container.innerHTML = '<div class="loading-state">Comparing all 5 scheduling algorithms...</div>';
@@ -961,11 +975,12 @@ document.addEventListener('DOMContentLoaded', () => {
       };
 
       const results = res.results || {};
+      const totalProcs = res.total_processes || res.workload_count || (res.results && res.results.fcfs && res.results.fcfs.processes ? res.results.fcfs.processes.length : 5);
 
       container.innerHTML = `
         <div class="card-header">
           <span class="card-title">Comparative Analysis of 5 Scheduling Algorithms</span>
-          <span class="text-secondary text-xs">Workload: <strong>${(res.workload_count || 5)}</strong> processes</span>
+          <span class="text-secondary text-xs">Workload: <strong>${totalProcs}</strong> processes</span>
         </div>
         <table class="data-table">
           <thead>
