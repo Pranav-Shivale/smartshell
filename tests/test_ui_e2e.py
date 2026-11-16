@@ -228,18 +228,35 @@ def main():
         record("GET / serves index.html", status == 200 and "SmartShell" in body)
         record("index.html contains 6 view sections",
                all(x in body for x in ["view-terminal", "view-dashboard", "view-processes", "view-scheduling", "view-system", "view-settings"]))
+        record("index.html navigation items have accessible href anchors",
+               all(f'href="#{x}"' in body for x in ["terminal", "dashboard", "processes", "scheduling", "system", "settings"]))
 
         status, body = request(port, "GET", "/css/app.css")
         record("GET /css/app.css serves CSS stylesheet", status == 200 and len(body) > 1000 and ".term-tab" in body)
+        record("CSS stylesheet contains terminal cursor and line height preservation",
+               ".terminal-cursor" in body and ".terminal-line" in body)
+        record("CSS stylesheet contains toast pointer-events passthrough",
+               ".toast-container" in body and "pointer-events: none" in body)
+
+        status, body = request(port, "GET", "/css/tokens.css")
+        record("GET /css/tokens.css serves design tokens", status == 200 and "--space-1" in body)
+        record("tokens.css defines prefers-color-scheme light theme tokens",
+               "prefers-color-scheme: light" in body and "--bg-canvas" in body)
 
         status, body = request(port, "GET", "/js/api.js")
         record("GET /js/api.js serves REST client", status == 200 and "SmartShellAPI" in body)
 
         status, body = request(port, "GET", "/js/terminal.js")
         record("GET /js/terminal.js serves ANSI terminal emulator", status == 200 and "SmartTerminal" in body)
+        record("terminal.js supports clipboard paste and cursor rendering",
+               "clipboardData" in body and "terminal-cursor" in body)
 
         status, body = request(port, "GET", "/js/app.js")
         record("GET /js/app.js serves Application Coordinator", status == 200 and "activeView" in body and "runSimulation" in body)
+        record("app.js handles browser popstate navigation and modal Escape key",
+               "popstate" in body and "Escape" in body)
+        record("app.js validates quantum and preserves process table scroll position",
+               "quantum < 1" in body and "prevScrollTop" in body)
 
         # --- Section 2: Health & Authentication ---
         print("\n--- 2. Health & Authentication ---")
