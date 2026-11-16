@@ -283,8 +283,19 @@ document.addEventListener('DOMContentLoaded', () => {
         <button class="tab-close" title="Close Session">&times;</button>
       `;
 
+      tabEl.tabIndex = 0;
+      tabEl.setAttribute('role', 'tab');
+      tabEl.setAttribute('aria-selected', 'false');
+
       tabEl.addEventListener('click', (e) => {
         if (!e.target.classList.contains('tab-close')) {
+          this.activateSession(sessionId);
+        }
+      });
+
+      tabEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
           this.activateSession(sessionId);
         }
       });
@@ -349,7 +360,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
       // Update tab selection styles
       document.querySelectorAll('.term-tab').forEach((t) => {
-        t.classList.toggle('active', t.dataset.sessionId === sessionId);
+        const isActive = t.dataset.sessionId === sessionId;
+        t.classList.toggle('active', isActive);
+        t.setAttribute('aria-selected', isActive ? 'true' : 'false');
       });
 
       // Toggle terminal wrapper visibility

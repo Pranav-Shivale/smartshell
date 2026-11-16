@@ -148,6 +148,11 @@ body {
   font-weight: var(--font-weight-medium);
 }
 
+.nav-item:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -1px;
+}
+
 .nav-item svg {
   width: var(--space-4);
   height: var(--space-4);
@@ -750,6 +755,11 @@ body {
   color: var(--text-primary);
   border-color: var(--border-default);
   font-weight: var(--font-weight-medium);
+}
+
+.term-tab:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -1px;
 }
 
 .term-tab .tab-dot {
