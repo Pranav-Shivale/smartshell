@@ -35,16 +35,28 @@ document.addEventListener('DOMContentLoaded', () => {
           e.preventDefault();
           const target = item.dataset.view;
           if (target) {
-            this.switchView(target);
+            this.switchView(target, true);
           }
         });
       });
+
+      window.addEventListener('popstate', (e) => {
+        const hashView = (window.location.hash || '').replace('#', '');
+        const target = hashView || (e.state && e.state.view) || 'terminal';
+        if (['terminal', 'dashboard', 'processes', 'scheduling', 'system', 'settings'].includes(target)) {
+          this.switchView(target, false);
+        }
+      });
     },
 
-    switchView(viewName) {
+    switchView(viewName, pushHistory = false) {
       this.activeView = viewName;
-      if (window.history && window.history.replaceState) {
-        window.history.replaceState(null, null, `#${viewName}`);
+      if (window.history) {
+        if (pushHistory && window.location.hash !== `#${viewName}`) {
+          window.history.pushState({ view: viewName }, '', `#${viewName}`);
+        } else if (window.history.replaceState) {
+          window.history.replaceState({ view: viewName }, '', `#${viewName}`);
+        }
       }
 
       // Update sidebar nav active state
