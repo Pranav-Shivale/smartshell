@@ -1,5 +1,5 @@
 /**
- * SmartShell 3.0 — Application Coordinator
+ * SmartShell — Application Coordinator
  * Connects the dark-mode dashboard UI with the CivetWeb backend APIs,
  * terminal session lifecycle, process monitor, and CPU scheduling lab.
  */

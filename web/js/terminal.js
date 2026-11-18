@@ -1,5 +1,5 @@
 /**
- * SmartShell 3.0 — Enterprise ANSI Terminal Emulator
+ * SmartShell — Enterprise ANSI Terminal Emulator
  * Features 2D grid buffer, scrollback history, alternate screen buffer,
  * 256-color ANSI rendering, and robust WebSocket lifecycle management.
  */

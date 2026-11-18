@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-test_ui_e2e.py — Comprehensive End-to-End Verification of SmartShell 3.0 Web UI
+test_ui_e2e.py — Comprehensive End-to-End Verification of SmartShell Web UI
 
 Tests:
 1. Static Asset Serving:
@@ -202,7 +202,7 @@ async def test_websocket_terminal(port, session_id, ws_ticket):
 
 def main():
     print("=" * 60)
-    print("SmartShell 3.0 Web UI & Backend Integration Test Suite")
+    print("SmartShell Web UI & Backend Integration Test Suite")
     print("=" * 60)
 
     port = find_free_port()

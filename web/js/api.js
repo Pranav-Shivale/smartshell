@@ -1,5 +1,5 @@
 /**
- * SmartShell 3.0 — REST API Client
+ * SmartShell — REST API Client
  */
 
 class SmartShellAPI {
