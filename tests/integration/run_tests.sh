@@ -3,6 +3,8 @@
 
 set -e
 
+unset OLDPWD
+
 SHELL_BIN="./bin/smartshell"
 TMP_DIR="/tmp/smartshell_integration_$$"
 mkdir -p "$TMP_DIR"

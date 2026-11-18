@@ -179,6 +179,7 @@ static void test_setup_redirections_execution(void)
     fclose(f);
 
     /* Save original stdout */
+    fflush(stdout);
     int saved_stdout = dup(STDOUT_FILENO);
     ASSERT_TRUE(saved_stdout >= 0);
 

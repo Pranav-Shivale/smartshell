@@ -62,6 +62,7 @@ SmartShell follows a clean, modular design:
 | **Built-ins** | `src/builtins.c`, `include/builtins.h` | Implementation of `cd`, `pwd`, `jobs`, `fg`, `bg`, `kill`, `help`, `exit`, etc. |
 | **Process Monitor** | `src/proc_monitor.c`, `include/proc_monitor.h` | Linux `/proc` filesystem reader, CPU delta sampler, and memory parser. |
 | **Scheduler** | `src/scheduler.c`, `include/scheduler.h` | Discrete-event virtual CPU scheduling algorithms, metrics, and Gantt renderer. |
+| **Web Server** | `src/server/*`, `include/server/*` | Standalone HTTP REST backend (`bin/smartshell-server`) powered by CivetWeb and cJSON with token security. |
 | **Utilities** | `src/utils.c`, `include/utils.h` | Safe memory allocators (`xmalloc`, `xcalloc`, `xstrdup`) and string helpers. |
 
 ---
@@ -71,20 +72,25 @@ SmartShell follows a clean, modular design:
 Compile SmartShell using the provided Makefile:
 
 ```bash
-# Standard release build (-std=c11 -Wall -Wextra -Werror -pedantic)
+# Standard release build for CLI (bin/smartshell)
 make
+
+# Web server build (bin/smartshell-server)
+make server
 
 # Debug build with symbols (-g -O0 -DDEBUG)
 make clean && make debug
 
 # Sanitizer build (AddressSanitizer + UndefinedBehaviorSanitizer)
 make clean && make asan
+make server-asan
 ```
 
 ---
 
 ## Run
 
+### 1. Interactive CLI Shell
 Launch the shell binary from the project root:
 
 ```bash
@@ -96,6 +102,15 @@ To run in batch mode or pass commands directly:
 ```bash
 echo "schedule fcfs" | ./bin/smartshell
 ```
+
+### 2. Standalone Web Server
+Launch the HTTP web server (default localhost port 8080):
+
+```bash
+./bin/smartshell-server -p 8080
+```
+
+The server generates a secure 256-bit cryptographically random token saved to `~/.smartshell/session.token` with strict 0600 permissions. Pass this token in the `Authorization: Bearer <token>` header for all authenticated REST API endpoints.
 
 ---
 
@@ -248,12 +263,40 @@ The simulator outputs a text-based Gantt chart with precise tick markers and mul
 
 ---
 
+---
+
+## Web Server & REST API
+
+SmartShell 3.0 introduces a standalone C web server (`bin/smartshell-server`) powered by CivetWeb and cJSON, exposing SmartShell's process monitoring, system information, and CPU scheduling simulation as secure REST APIs.
+
+### Security
+- **Authentication**: All endpoints (except `/api/health`) require a 256-bit Bearer token (`Authorization: Bearer <hex_token>`) generated dynamically at startup and saved to `~/.smartshell/session.token` (permissions `0600`).
+- **Host & Origin Validation**: Protects against DNS rebinding and cross-origin attacks by restricting `Host` and `Origin` headers to loopback (`127.0.0.1` / `localhost`).
+- **Input Sanitization**: Request payloads are bounded to 64 KB (HTTP 413 Payload Too Large on overflow), and all query parameters/PID values are strictly validated.
+- **Root Execution Guard**: Refuses to run as root by default to prevent privilege escalation.
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/health` | Public server status and version check. |
+| `GET` | `/api/auth/verify` | Token validation check. |
+| `GET` | `/api/sysinfo` | Host OS, kernel, CPU topology, memory breakdown, and shell environment. |
+| `GET` | `/api/metrics` | Live system CPU utilization percentage and memory statistics. |
+| `GET` | `/api/processes` | Process list supporting sorting (`sort=cpu\|memory`) and limit (`limit=N`). |
+| `GET` | `/api/processes/:pid` | Detailed inspection of a specific process PID from `/proc`. |
+| `GET` | `/api/process-tree` | Hierarchical process tree structure with cycle detection. |
+| `POST` | `/api/scheduler/simulate` | Simulates FCFS, SJF, RR, Priority, or MLFQ on custom workloads (1–32 processes). |
+| `POST` | `/api/scheduler/compare` | Compares all five algorithms side-by-side on an identical workload. |
+
+---
+
 ## Testing
 
 SmartShell contains a comprehensive, multi-tiered test suite:
 
 ```bash
-# 1. Run all unit tests (145 unit tests across 8 suites)
+# 1. Run all unit tests (148 unit tests across 10 suites)
 make test
 
 # 2. Run unit tests under AddressSanitizer and UndefinedBehaviorSanitizer
@@ -261,9 +304,15 @@ make test-asan
 
 # 3. Run all integration tests and interactive PTY tests
 make test-integration
+
+# 4. Run web server REST API and security integration tests
+make test-server
+
+# 5. Run web server tests under AddressSanitizer and UndefinedBehaviorSanitizer
+make test-server-asan
 ```
 
-All 145 unit tests, 92 integration tests, and 14 pseudo-terminal (PTY) job-control tests pass with 0 failures and zero sanitizer errors.
+All 148 unit tests, 92 integration tests, 14 pseudo-terminal (PTY) job-control tests, and 21 server integration/security tests pass with 0 failures and zero sanitizer errors.
 
 ---
 

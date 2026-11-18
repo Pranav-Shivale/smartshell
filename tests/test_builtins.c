@@ -172,6 +172,7 @@ static void test_builtin_exit(void)
 
 static char *capture_builtin_output(const command_t *cmd, int *ret_code)
 {
+    fflush(stdout);
     int pipefd[2];
     if (pipe(pipefd) != 0) return NULL;
 
